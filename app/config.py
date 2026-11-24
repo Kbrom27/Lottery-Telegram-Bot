@@ -124,7 +124,7 @@ class Settings:
             "campaign_name": self.campaign_name,
             "bot_token": self.bot_token,
             "admin_ids": ", ".join(str(x) for x in sorted(self.admin_ids)),
-            "ticket_price": str(self.ticket_price.normalize()),
+            "ticket_price": f"{self.ticket_price.normalize():f}",
             "max_tickets_per_payment": self.max_tickets_per_payment,
             "first_ticket_number": self.first_ticket_number,
             "ticket_width": self.ticket_width,

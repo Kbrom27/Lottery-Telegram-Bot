@@ -84,11 +84,26 @@ jobs:
             }
             if (-not $ready) { throw "LotteryBot.exe did not become healthy in time" }
 
+            $html = Invoke-WebRequest -Uri "http://127.0.0.1:8025/" -UseBasicParsing
+            if ($html.StatusCode -ne 200 -or $html.Content -notmatch "LotteryBot") { throw "HTML dashboard failed" }
+
+            $st = (Invoke-WebRequest -Uri "http://127.0.0.1:8025/api/status" -UseBasicParsing).Content | ConvertFrom-Json
+            if (-not $st.qr_available) { throw "QR module missing in exe" }
+
             $dash = Invoke-WebRequest -Uri "http://127.0.0.1:8025/api/dashboard" -UseBasicParsing
             if ($dash.StatusCode -ne 200) { throw "Dashboard failed" }
 
             $xlsx = Invoke-WebRequest -Uri "http://127.0.0.1:8025/api/export/excel" -UseBasicParsing
             if ($xlsx.StatusCode -ne 200 -or $xlsx.RawContentLength -lt 1000) { throw "Excel export failed" }
+
+            $rep = Invoke-WebRequest -Uri "http://127.0.0.1:8025/api/export/report" -UseBasicParsing
+            if ($rep.StatusCode -ne 200 -or $rep.RawContentLength -lt 1000) { throw "Summary report failed" }
+
+            $csv = Invoke-WebRequest -Uri "http://127.0.0.1:8025/api/export/csv" -UseBasicParsing
+            if ($csv.StatusCode -ne 200) { throw "CSV export failed" }
+
+            $commit = Invoke-WebRequest -Uri "http://127.0.0.1:8025/api/draw/commit" -Method POST -UseBasicParsing
+            if ($commit.StatusCode -ne 200) { throw "Draw commit failed" }
 
             Write-Host "Smoke test passed! Excel bytes:" $xlsx.RawContentLength
           } finally {

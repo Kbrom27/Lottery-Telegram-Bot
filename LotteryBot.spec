@@ -1,33 +1,31 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
 
 hiddenimports = [
     "aiosqlite",
     "sqlite3",
+    "asyncpg",
+    "anthropic",
     "sqlalchemy.dialects.sqlite",
     "sqlalchemy.dialects.sqlite.aiosqlite",
+    "sqlalchemy.dialects.postgresql",
+    "sqlalchemy.dialects.postgresql.asyncpg",
     "sqlalchemy.sql.default_comparator",
-    "uvicorn.logging",
-    "uvicorn.loops",
-    "uvicorn.loops.auto",
-    "uvicorn.loops.asyncio",
-    "uvicorn.protocols",
-    "uvicorn.protocols.http",
-    "uvicorn.protocols.http.auto",
-    "uvicorn.protocols.http.h11_impl",
-    "uvicorn.protocols.websockets",
-    "uvicorn.protocols.websockets.auto",
-    "uvicorn.lifespan",
-    "uvicorn.lifespan.on",
     "pystray",
     "pystray._win32",
     "zxingcpp",
     "openpyxl",
     "pytesseract",
+    "PIL.Image",
+    "PIL.ImageDraw",
+    "PIL.ImageOps",
+    "certifi",
     "draw",
     "app.bot",
     "app.config",
     "app.db",
     "app.extract",
+    "app.main",
     "app.messages",
     "app.models",
     "app.reports",
@@ -38,6 +36,8 @@ hiddenimports = [
     "app.web_ui",
     "app.worker",
 ]
+hiddenimports += collect_submodules("uvicorn")
+hiddenimports += [m for m in collect_submodules("aiogram") if not m.startswith("aiogram.test")]
 
 a = Analysis(
     ["desktop_launcher.py"],
