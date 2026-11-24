@@ -1,0 +1,59 @@
+============================================================
+        LOTTERYBOT FOR WINDOWS — CLIENT QUICK GUIDE
+============================================================
+
+1. HOW TO INSTALL & RUN
+   - Put "LotteryBot.exe" inside a dedicated folder on your
+     Windows PC (for example: C:\LotteryBot\LotteryBot.exe
+     or Desktop\LotteryBot\LotteryBot.exe).
+   - Double-click "LotteryBot.exe".
+   - Wait 2-3 seconds: your default web browser will open
+     automatically to the Web Control Center (http://127.0.0.1:8000).
+   - A small ticket icon also appears in your Windows System
+     Tray (bottom-right near the clock). Right-click it anytime
+     to open the dashboard, start/stop the bot, or exit.
+
+2. FIRST-TIME SETUP (IN YOUR WEB BROWSER)
+   On first launch, fill out the Setup & Settings page:
+   - Campaign / Bot Name
+   - Telegram Bot Token (create a bot via @BotFather -> /newbot)
+     Click "Verify Token" to confirm it connects.
+   - Admin Telegram ID(s) (message @userinfobot on Telegram)
+   - Ticket Price in ETB (e.g. 100 ETB). Multiples (200, 300, 400...)
+     automatically issue 2, 3, 4... lottery numbers.
+   - CBE Account Number (required for instant CBE QR verification)
+   - Telebirr Number & Account Name (optional)
+   - Click "Save Settings & Start Bot Service".
+
+3. USING THE WEB DASHBOARD
+   - Start / Stop Button: Top-right bar starts or pauses the bot.
+   - Live Metrics: Shows Total Birr Received, Lottery Numbers
+     Issued, Unique Participants, and Pending Reviews.
+   - Issued Numbers Table: Search who holds which ticket numbers
+     (toggle between "By Person" and "Every Ticket Row").
+   - Download Buttons:
+     * Download Lottery Holders Excel (.xlsx) — includes full names,
+       bank payer names, usernames, and grouped summary per holder.
+     * Download Financial Summary Report (.xlsx)
+     * Download Draw CSV / Public List CSV
+   - Pending Reviews Tab: Inspect screenshot receipts and approve
+     or reject manually if needed.
+   - Draw Winners Tab: Provably fair SHA-256 winner selection.
+
+4. WHERE YOUR DATA IS SAVED
+   - A "lottery_data" folder is created automatically next to
+     LotteryBot.exe (containing config.json, lottery.db, and
+     saved receipt screenshots). Back up this folder periodically!
+
+5. OPTIONAL ADD-ONS
+   - Cropped / Telebirr Screenshots (Text OCR):
+     Full CBE screenshots with QR codes work automatically out of
+     the box. If you also want automatic text OCR on Telebirr or
+     cropped screenshots, install Tesseract-OCR for Windows and
+     restart LotteryBot.exe.
+   - Automatic Phone SMS Forwarding:
+     If you use an Android SMS Forwarder app on your receiving SIM
+     phone, enable "Allow LAN access" in Settings, restart the app,
+     and point the app to: POST http://<YOUR-PC-IP>:8000/sms
+     with header X-Secret: <your SMS secret from Settings>.
+============================================================

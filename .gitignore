@@ -1,0 +1,13 @@
+.env
+data/
+lottery_data/
+draw_seed.txt
+__pycache__/
+.pytest_cache/
+.venv/
+.vscode/
+build/
+dist/
+*.pyc
+*.db
+*.log

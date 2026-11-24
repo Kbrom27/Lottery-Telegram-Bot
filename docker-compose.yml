@@ -1,0 +1,32 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lottery
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lottery}
+      POSTGRES_DB: lottery
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lottery"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://lottery:${POSTGRES_PASSWORD:-lottery}@db:5432/lottery
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"   # put an HTTPS reverse proxy (Caddy/nginx) in front; /sms and the webhook need HTTPS
+    volumes:
+      - ./data:/srv/data   # original screenshots (evidence) - back this up with the database
+
+volumes:
+  pgdata:

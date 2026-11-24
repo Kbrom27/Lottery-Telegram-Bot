@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LotteryBot Control Center</title>
+<style>
+  :root {
+    --bg: #f4f6fb;
+    --card: #ffffff;
+    --ink: #0f172a;
+    --muted: #64748b;
+    --border: #e2e8f0;
+    --primary: #1d4ed8;
+    --primary-hover: #1e40af;
+    --green: #059669;
+    --green-bg: #d1fae5;
+    --red: #dc2626;
+    --red-bg: #fee2e2;
+    --amber: #d97706;
+    --amber-bg: #fef3c7;
+    --slate-bg: #f1f5f9;
+    --radius: 12px;
+    --shadow: 0 1px 3px rgba(15,23,42,.08), 0 4px 14px rgba(15,23,42,.04);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.45;
+  }
+  .topbar {
+    background: #0f172a;
+    color: #fff;
+    padding: 14px 24px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    box-shadow: 0 2px 10px rgba(0,0,0,.15);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-icon {
+    width: 38px; height: 38px; border-radius: 10px;
+    background: linear-gradient(135deg, #2563eb, #10b981);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; font-weight: 800;
+  }
+  .brand h1 { margin: 0; font-size: 18px; font-weight: 700; }
+  .brand small { color: #94a3b8; font-size: 12px; display: block; }
+  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .badge {
+    padding: 6px 12px; border-radius: 999px; font-size: 13px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .badge.running { background: #064e3b; color: #6ee7b7; border: 1px solid #059669; }
+  .badge.stopped { background: #334155; color: #e2e8f0; }
+  .badge.unconfigured { background: #78350f; color: #fde68a; }
+  .badge.error { background: #7f1d1d; color: #fecaca; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+
+  button, .btn {
+    border: none; border-radius: 8px; padding: 9px 15px; font-size: 13px; font-weight: 600;
+    cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+    text-decoration: none; transition: all .15s ease;
+  }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  .btn-start { background: var(--green); color: #fff; }
+  .btn-start:hover:not(:disabled) { background: #047857; }
+  .btn-stop { background: var(--red); color: #fff; }
+  .btn-stop:hover:not(:disabled) { background: #b91c1c; }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+  .btn-secondary { background: #fff; color: var(--ink); border: 1px solid var(--border); }
+  .btn-secondary:hover:not(:disabled) { background: var(--slate-bg); }
+  .btn-dark { background: #334155; color: #fff; }
+  .btn-dark:hover:not(:disabled) { background: #475569; }
+  .btn-sm { padding: 6px 10px; font-size: 12px; }
+
+  .nav {
+    background: #fff; border-bottom: 1px solid var(--border);
+    padding: 0 24px; display: flex; gap: 4px; overflow-x: auto;
+  }
+  .tab-btn {
+    background: transparent; color: var(--muted); border-radius: 0;
+    padding: 13px 16px; border-bottom: 3px solid transparent; font-weight: 600;
+  }
+  .tab-btn:hover { color: var(--ink); background: #f8fafc; }
+  .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
+  .tab-pill {
+    background: var(--red); color: #fff; font-size: 11px; padding: 1px 6px;
+    border-radius: 999px; margin-left: 4px;
+  }
+
+  .container { max-width: 1280px; margin: 20px auto; padding: 0 20px 40px; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  .alert {
+    padding: 12px 16px; border-radius: var(--radius); margin-bottom: 16px;
+    font-size: 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .alert-warn { background: var(--amber-bg); color: #92400e; border: 1px solid #fcd34d; }
+  .alert-err { background: var(--red-bg); color: #991b1b; border: 1px solid #fca5a5; }
+  .alert-ok { background: var(--green-bg); color: #065f46; border: 1px solid #6ee7b7; }
+
+  .kpis {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 14px; margin-bottom: 18px;
+  }
+  .kpi {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px 18px; box-shadow: var(--shadow);
+  }
+  .kpi-label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+  .kpi-val { font-size: 26px; font-weight: 800; margin-top: 6px; color: var(--ink); }
+  .kpi-sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .kpi.money .kpi-val { color: var(--green); }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px 20px; box-shadow: var(--shadow); margin-bottom: 18px;
+  }
+  .card-header {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 12px; margin-bottom: 14px;
+  }
+  .card-title { margin: 0; font-size: 16px; font-weight: 700; }
+
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  input[type="text"], input[type="number"], input[type="password"], input[type="datetime-local"], select, textarea {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px;
+    font-size: 14px; font-family: inherit; background: #fff; color: var(--ink);
+  }
+  input:focus, select:focus, textarea:focus { outline: 2px solid #93c5fd; border-color: var(--primary); }
+  .search-input { width: 280px !important; max-width: 100%; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { background: var(--slate-bg); color: #334155; font-weight: 700; font-size: 12px; text-transform: uppercase; }
+  tr:hover td { background: #f8fafc; }
+  .table-wrap { overflow-x: auto; max-height: 520px; border: 1px solid var(--border); border-radius: 8px; }
+  .ticket-chip {
+    display: inline-block; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe;
+    padding: 2px 7px; border-radius: 6px; font-family: ui-monospace, monospace; font-weight: 700; font-size: 12px;
+    margin: 2px 3px 2px 0;
+  }
+
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  .form-group { margin-bottom: 14px; }
+  .form-group label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 5px; color: #334155; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .check-row { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 500; cursor: pointer; }
+  .check-row input { width: auto; }
+
+  .seg { display: inline-flex; background: var(--slate-bg); padding: 3px; border-radius: 8px; }
+  .seg button { background: transparent; color: var(--muted); padding: 6px 12px; border-radius: 6px; }
+  .seg button.active { background: #fff; color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+
+  .review-card {
+    border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 14px;
+    display: grid; grid-template-columns: 220px 1fr; gap: 16px; align-items: start;
+  }
+  @media (max-width: 700px) { .review-card { grid-template-columns: 1fr; } }
+  .review-img { width: 100%; max-height: 280px; object-fit: contain; border-radius: 8px; border: 1px solid var(--border); background: #f8fafc; cursor: pointer; }
+
+  .log-box {
+    background: #0f172a; color: #e2e8f0; font-family: ui-monospace, Consolas, monospace;
+    font-size: 12px; padding: 14px; border-radius: 10px; height: 420px; overflow-y: auto; white-space: pre-wrap;
+  }
+  .toast {
+    position: fixed; bottom: 20px; right: 20px; background: #0f172a; color: #fff;
+    padding: 12px 18px; border-radius: 10px; font-size: 14px; font-weight: 500;
+    box-shadow: 0 10px 25px rgba(0,0,0,.25); z-index: 200; display: none;
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-icon">🎟</div>
+    <div>
+      <h1 id="hdrTitle">Telegram Lottery Control Center</h1>
+      <small id="hdrSub">Loading status...</small>
+    </div>
+  </div>
+  <div class="controls">
+    <span id="statusBadge" class="badge stopped"><span class="dot"></span><span id="statusText">Checking...</span></span>
+    <button id="btnStart" class="btn-start" onclick="serviceAction('start')">▶ Start Service</button>
+    <button id="btnStop" class="btn-stop" onclick="serviceAction('stop')" style="display:none">⏹ Stop Service</button>
+    <button id="btnRestart" class="btn-dark" onclick="serviceAction('restart')" style="display:none">↻ Restart</button>
+  </div>
+</header>
+
+<nav class="nav">
+  <button class="tab-btn active" data-tab="dashboard" onclick="showTab('dashboard')">📊 Dashboard &amp; Holders</button>
+  <button class="tab-btn" data-tab="reviews" onclick="showTab('reviews')">🔎 Pending Reviews <span id="reviewPill" class="tab-pill" style="display:none">0</span></button>
+  <button class="tab-btn" data-tab="credits" onclick="showTab('credits')">💳 Bank Credits &amp; CSV</button>
+  <button class="tab-btn" data-tab="draw" onclick="showTab('draw')">🎲 Draw Winners</button>
+  <button class="tab-btn" data-tab="settings" onclick="showTab('settings')">⚙️ Setup &amp; Settings</button>
+  <button class="tab-btn" data-tab="logs" onclick="showTab('logs')">📜 System Logs</button>
+</nav>
+
+<main class="container">
+  <div id="bannerArea"></div>
+
+  <!-- DASHBOARD TAB -->
+  <section id="tab-dashboard" class="panel active">
+    <div class="kpis">
+      <div class="kpi money">
+        <div class="kpi-label">Total Birr Received</div>
+        <div class="kpi-val" id="kpiBirr">0.00 ETB</div>
+        <div class="kpi-sub" id="kpiApproved">0 approved payments</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Lottery Numbers Given</div>
+        <div class="kpi-val" id="kpiTickets">0</div>
+        <div class="kpi-sub">Next number: <strong id="kpiNext">#00001</strong></div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Unique Participants</div>
+        <div class="kpi-val" id="kpiPeople">0</div>
+        <div class="kpi-sub" id="kpiWaiting">0 currently verifying</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Pending Review / Rejected</div>
+        <div class="kpi-val" id="kpiReview">0 / 0</div>
+        <div class="kpi-sub">Bank credits recorded: <span id="kpiCredits">0</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">📥 Export Reports &amp; Excel Spreadsheets</h2>
+        <div class="toolbar">
+          <a class="btn btn-start" href="/api/export/excel" download>📊 Download Lottery Holders Excel (.xlsx)</a>
+          <a class="btn btn-primary" href="/api/export/report" download>📈 Download Financial Summary Report (.xlsx)</a>
+          <a class="btn btn-secondary" href="/api/export/csv" download>📄 Draw CSV (Full)</a>
+          <a class="btn btn-secondary" href="/api/export/csv?public=1" download>📄 Public List CSV</a>
+        </div>
+      </div>
+      <div class="hint">
+        <strong>Excel (.xlsx)</strong> includes two sheets: every ticket row with holder full name &amp; bank payer name, plus a grouped summary per person.
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+          <h2 class="card-title">🎟 Issued Lottery Numbers</h2>
+          <div class="seg">
+            <button id="viewHoldersBtn" class="active" onclick="setViewMode('holders')">By Person (Who owns what)</button>
+            <button id="viewTicketsBtn" onclick="setViewMode('tickets')">Every Ticket Row</button>
+          </div>
+        </div>
+        <div class="toolbar">
+          <input id="searchBox" class="search-input" type="text" placeholder="Search name, #ticket, @username, ref..." oninput="loadHolders()">
+          <button class="btn-secondary" onclick="refreshDashboard()">↻ Refresh</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead id="holdersThead"></thead>
+          <tbody id="holdersTbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><h2 class="card-title">🏦 Breakdown by Payment Provider</h2></div>
+        <table>
+          <thead><tr><th>Provider</th><th>Payments</th><th>Tickets</th><th>Birr Received</th></tr></thead>
+          <tbody id="provBody"></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="card-header"><h2 class="card-title">📅 Daily Sales Breakdown</h2></div>
+        <table>
+          <thead><tr><th>Date (EAT)</th><th>Payments</th><th>Tickets</th><th>Birr Received</th></tr></thead>
+          <tbody id="dailyBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- REVIEWS TAB -->
+  <section id="tab-reviews" class="panel">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">🔎 Payments Waiting for Manual Review</h2>
+        <button class="btn-secondary" onclick="loadReviews()">↻ Refresh</button>
+      </div>
+      <div id="reviewsList"></div>
+    </div>
+  </section>
+
+  <!-- CREDITS TAB -->
+  <section id="tab-credits" class="panel">
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><h2 class="card-title">📄 Import Bank Statement CSV</h2></div>
+        <p class="hint">CSV must have header columns: <code>reference,amount,sender,received_at</code></p>
+        <div class="form-group">
+          <input type="file" id="csvFileInput" accept=".csv,text/csv">
+        </div>
+        <button class="btn-primary" onclick="uploadCsvFile()">Upload &amp; Import CSV</button>
+      </div>
+      <div class="card">
+        <div class="card-header"><h2 class="card-title">📲 Paste Incoming Bank SMS</h2></div>
+        <p class="hint">Paste a "money received" SMS (Telebirr or CBE with receipt link) to add it immediately.</p>
+        <div class="form-group">
+          <textarea id="manualSmsText" rows="3" placeholder="Paste bank SMS text here..."></textarea>
+        </div>
+        <button class="btn-primary" onclick="submitManualSms()">Process SMS</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">💳 Recorded Incoming Bank Credits</h2>
+        <button class="btn-secondary" onclick="loadCredits()">↻ Refresh</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>Reference</th><th>Amount (ETB)</th><th>Sender</th><th>Claimed By Payment</th><th>Recorded At</th></tr></thead>
+          <tbody id="creditsBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- DRAW TAB -->
+  <section id="tab-draw" class="panel">
+    <div class="card">
+      <div class="card-header"><h2 class="card-title">🎲 Provably Fair Lottery Draw</h2></div>
+      <p class="hint">Uses SHA-256 commit-reveal with rejection sampling (same algorithm as <code>draw.py</code>).</p>
+      <div class="grid-2">
+        <div class="card" style="box-shadow:none; margin:0;">
+          <h3 style="margin-top:0">Step 1: Secret Seed &amp; Commitment</h3>
+          <p class="hint">Generate a secret random seed and publish the Commitment Hash before closing ticket sales.</p>
+          <div id="commitStatus" class="form-group" style="font-family:monospace; word-break:break-all; font-size:13px;"></div>
+          <button class="btn-primary" onclick="doCommit()">🔐 Generate / View Commitment Hash</button>
+        </div>
+        <div class="card" style="box-shadow:none; margin:0;">
+          <h3 style="margin-top:0">Step 2: Pick Winners</h3>
+          <div class="form-group">
+            <label>Public Entropy Value (e.g. live random number or block hash)</label>
+            <input id="drawEntropy" type="text" placeholder="Enter public unpredictable value...">
+          </div>
+          <div class="grid-2">
+            <div class="form-group">
+              <label>Number of Winners</label>
+              <input id="drawWinners" type="number" value="1" min="1" max="100">
+            </div>
+            <div class="form-group" style="display:flex; align-items:end; padding-bottom:8px;">
+              <label class="check-row"><input id="drawOnePer" type="checkbox" checked> Max 1 prize per person</label>
+            </div>
+          </div>
+          <button class="btn-start" onclick="doRunDraw()">🎉 Run Official Draw</button>
+        </div>
+      </div>
+      <div id="drawResult" style="margin-top:16px;"></div>
+    </div>
+  </section>
+
+  <!-- SETTINGS / FIRST-RUN SETUP TAB -->
+  <section id="tab-settings" class="panel">
+    <form id="settingsForm" onsubmit="saveSettings(event, false)">
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">🤖 1. Telegram Bot &amp; Admin Configuration</h2>
+          <button type="button" id="btnShortcut" class="btn-secondary btn-sm" onclick="createShortcut()" style="display:none">📌 Create Desktop Shortcut</button>
+        </div>
+        <div class="grid-2">
+          <div class="form-group">
+            <label>Campaign / Bot Display Name</label>
+            <input id="cfg_campaign_name" type="text" placeholder="e.g. Ethio Grand Lottery 2026" required>
+            <div class="hint">Shown on your web dashboard and Excel reports.</div>
+          </div>
+          <div class="form-group">
+            <label>Admin Telegram User ID(s) *</label>
+            <input id="cfg_admin_ids" type="text" placeholder="e.g. 123456789" required>
+            <div class="hint">Open <strong>@userinfobot</strong> on Telegram to get your numeric ID. Separate multiple IDs with commas.</div>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Telegram Bot Token (from @BotFather) *</label>
+          <div style="display:flex; gap:8px;">
+            <input id="cfg_bot_token" type="text" placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ" required>
+            <button type="button" class="btn-secondary" onclick="verifyToken()">Verify Token</button>
+          </div>
+          <div id="tokenCheckResult" class="hint">Message <strong>@BotFather</strong> on Telegram &rarr; send <code>/newbot</code> &rarr; paste the API token here.</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h2 class="card-title">🎟 2. Ticket Pricing &amp; Campaign Rules</h2></div>
+        <div class="grid-2">
+          <div class="form-group">
+            <label>Birr (ETB) for 1 Lottery Number *</label>
+            <input id="cfg_ticket_price" type="number" step="0.01" min="1" value="100" required>
+            <div class="hint">Multiples (200, 300, 400 ETB) automatically issue 2, 3, 4 lottery numbers.</div>
+          </div>
+          <div class="form-group">
+            <label>Max Tickets Per Single Payment</label>
+            <input id="cfg_max_tickets" type="number" min="1" max="1000" value="50" required>
+          </div>
+          <div class="form-group">
+            <label>Starting Ticket Number</label>
+            <input id="cfg_first_num" type="number" min="1" value="1" required>
+          </div>
+          <div class="form-group">
+            <label>Ticket Formatting Width (Digits)</label>
+            <input id="cfg_ticket_width" type="number" min="1" max="10" value="5" required>
+            <div class="hint">5 means #00001, #00002... | 1 means #1, #2...</div>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="check-row"><input id="cfg_unbounded" type="checkbox" checked onchange="toggleDates()"> Campaign always open (no start/end date restriction)</label>
+        </div>
+        <div id="dateFields" class="grid-2" style="display:none;">
+          <div class="form-group">
+            <label>Campaign Start (Ethiopia UTC+3)</label>
+            <input id="cfg_start" type="datetime-local">
+          </div>
+          <div class="form-group">
+            <label>Campaign End (Ethiopia UTC+3)</label>
+            <input id="cfg_end" type="datetime-local">
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h2 class="card-title">🏦 3. Receiving Bank &amp; Payment Accounts</h2></div>
+        <div class="grid-2">
+          <div class="form-group">
+            <label>CBE Account Number (Required for automatic CBE QR verification)</label>
+            <input id="cfg_cbe_acc" type="text" placeholder="e.g. 1000XXXXXXXXX" oninput="previewInstructions()">
+          </div>
+          <div class="form-group">
+            <label>CBE Account Holder Name</label>
+            <input id="cfg_cbe_name" type="text" placeholder="e.g. Full Name" oninput="previewInstructions()">
+          </div>
+          <div class="form-group">
+            <label>Telebirr Phone Number (Optional)</label>
+            <input id="cfg_tb_num" type="text" placeholder="e.g. 09XXXXXXXX" oninput="previewInstructions()">
+          </div>
+          <div class="form-group">
+            <label>Telebirr Account Name (Optional)</label>
+            <input id="cfg_tb_name" type="text" placeholder="e.g. Full Name" oninput="previewInstructions()">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Payment Instructions Message Shown to Users on /start</label>
+          <textarea id="cfg_instructions" rows="4"></textarea>
+          <div class="hint"><a href="#" onclick="rebuildInstructions(); return false;">↻ Auto-generate text from accounts above</a></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h2 class="card-title">🛡 4. Verification &amp; Advanced Settings</h2></div>
+        <div class="grid-2">
+          <div class="form-group">
+            <label>Wait Time for Delayed Bank SMS (Minutes)</label>
+            <input id="cfg_wait" type="number" min="0" max="120" value="2">
+          </div>
+          <div class="form-group">
+            <label>Retry Interval (Seconds)</label>
+            <input id="cfg_retry" type="number" min="5" max="600" value="15">
+          </div>
+          <div class="form-group">
+            <label>SMS Forwarder Webhook Secret</label>
+            <input id="cfg_sms_secret" type="text">
+            <div class="hint">Forward phone SMS to <code>POST http://&lt;PC-IP&gt;:8000/sms</code> with header <code>X-Secret</code>.</div>
+          </div>
+          <div class="form-group">
+            <label>Screenshot Reader Engine</label>
+            <select id="cfg_extractor" onchange="toggleClaude()">
+              <option value="tesseract">Local QR Code + OCR (Free, built-in)</option>
+              <option value="claude">Anthropic Claude Vision API</option>
+            </select>
+          </div>
+        </div>
+        <div id="claudeFields" class="grid-2" style="display:none;">
+          <div class="form-group">
+            <label>Anthropic API Key</label>
+            <input id="cfg_api_key" type="password" placeholder="sk-ant-...">
+          </div>
+          <div class="form-group">
+            <label>Claude Model</label>
+            <input id="cfg_claude_model" type="text" value="claude-sonnet-5-5">
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="form-group">
+            <label class="check-row"><input id="cfg_auto_start" type="checkbox"> Automatically start bot service whenever app opens</label>
+          </div>
+          <div class="form-group">
+            <label class="check-row"><input id="cfg_lan" type="checkbox"> Allow LAN access (bind 0.0.0.0 for phone SMS forwarder, takes effect on app restart)</label>
+          </div>
+        </div>
+
+        <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px;">
+          <button type="button" class="btn-start" onclick="saveSettings(event, true)">💾 Save Settings &amp; Start Bot Service</button>
+          <button type="submit" class="btn-primary">💾 Save Settings Only</button>
+        </div>
+      </div>
+    </form>
+  </section>
+
+  <!-- LOGS TAB -->
+  <section id="tab-logs" class="panel">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">📜 Diagnostics &amp; Live Service Logs</h2>
+        <button class="btn-secondary" onclick="loadLogs()">↻ Refresh</button>
+      </div>
+      <div id="diagInfo" class="hint" style="margin-bottom:12px;"></div>
+      <div id="logBox" class="log-box">Loading logs...</div>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast"></div>
+
+<script>
+let viewMode = 'holders';
+let currentStatus = {};
+let firstLoadDone = false;
+
+function toast(msg, isErr=false) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.background = isErr ? '#991b1b' : '#0f172a';
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 3500);
+}
+
+function showTab(name) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.querySelector(`.tab-btn[data-tab="${name}"]`).classList.add('active');
+  if (name === 'reviews') loadReviews();
+  if (name === 'credits') loadCredits();
+  if (name === 'draw') loadDrawStatus();
+  if (name === 'logs') loadLogs();
+}
+
+function setViewMode(mode) {
+  viewMode = mode;
+  document.getElementById('viewHoldersBtn').classList.toggle('active', mode === 'holders');
+  document.getElementById('viewTicketsBtn').classList.toggle('active', mode === 'tickets');
+  loadHolders();
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+function renderStatus(st) {
+  currentStatus = st;
+  document.getElementById('hdrTitle').textContent = st.campaign_name || 'Telegram Lottery Control Center';
+  const subParts = [st.db_type];
+  if (st.bot_username) subParts.push('@' + st.bot_username);
+  subParts.push(st.qr_available ? 'QR Scanner: Ready' : 'QR Scanner: Off');
+  subParts.push(st.tesseract_available ? 'OCR: Installed' : 'OCR: QR-Only Mode');
+  document.getElementById('hdrSub').textContent = subParts.join('  •  ');
+
+  const badge = document.getElementById('statusBadge');
+  badge.className = 'badge ' + st.status;
+  const labelMap = {
+    running: 'Running' + (st.bot_username ? ' (@' + st.bot_username + ')' : ''),
+    stopped: 'Stopped',
+    starting: 'Starting...',
+    unconfigured: 'Setup Required',
+    error: 'Error'
+  };
+  document.getElementById('statusText').textContent = labelMap[st.status] || st.status;
+
+  document.getElementById('btnStart').style.display = (st.status === 'running' || st.status === 'starting') ? 'none' : 'inline-flex';
+  document.getElementById('btnStop').style.display = (st.status === 'running' || st.status === 'starting') ? 'inline-flex' : 'none';
+  document.getElementById('btnRestart').style.display = (st.status === 'running') ? 'inline-flex' : 'none';
+
+  const banner = document.getElementById('bannerArea');
+  if (!st.configured) {
+    banner.innerHTML = `<div class="alert alert-warn"><span>⚠️ <strong>First-Time Setup Needed:</strong> Please fill in your Bot Token, Admin ID, Ticket Price, and Bank Details below, then click <strong>Save &amp; Start Bot Service</strong>.</span><button class="btn-primary btn-sm" onclick="showTab('settings')">Go to Setup</button></div>`;
+  } else if (st.status === 'error' && st.error) {
+    banner.innerHTML = `<div class="alert alert-err"><span>❌ <strong>Service Error:</strong> ${esc(st.error)}</span></div>`;
+  } else if (st.status === 'stopped') {
+    banner.innerHTML = `<div class="alert alert-warn"><span>⏸ The bot service is currently stopped. Click <strong>▶ Start Service</strong> in the top bar when ready to accept tickets.</span></div>`;
+  } else {
+    banner.innerHTML = '';
+  }
+
+  document.getElementById('diagInfo').innerHTML =
+    `Data Directory: <code>${esc(st.data_dir)}</code> &nbsp;|&nbsp; Database: <strong>${esc(st.db_type)}</strong> &nbsp;|&nbsp; ` +
+    `QR Scanner: <strong>${st.qr_available ? '✅ Active' : '❌ Missing'}</strong> &nbsp;|&nbsp; ` +
+    `Local Text OCR (Tesseract): <strong>${st.tesseract_available ? '✅ ' + esc(st.tesseract_path) : '⚠️ Not Installed (CBE QR codes still work automatically; Telebirr/cropped screenshots go to review)'}</strong>`;
+}
+
+async function serviceAction(action) {
+  const res = await fetch('/api/service/' + action, { method: 'POST' });
+  const st = await res.json();
+  renderStatus(st);
+  if (st.status === 'error') toast(st.error || 'Failed to start', true);
+  else if (st.status === 'unconfigured') showTab('settings');
+  else toast('Service ' + st.status);
+  refreshDashboard();
+}
+
+async function refreshDashboard() {
+  const res = await fetch('/api/dashboard');
+  const d = await res.json();
+  renderStatus(d.service);
+
+  document.getElementById('kpiBirr').textContent = d.total_birr_formatted + ' ETB';
+  document.getElementById('kpiApproved').textContent = d.approved_payments_count + ' approved payments';
+  document.getElementById('kpiTickets').textContent = d.total_tickets_issued;
+  document.getElementById('kpiNext').textContent = d.next_ticket_formatted;
+  document.getElementById('kpiPeople').textContent = d.total_participants;
+  document.getElementById('kpiWaiting').textContent = d.waiting_count + ' currently verifying';
+  document.getElementById('kpiReview').textContent = d.pending_review_count + ' / ' + d.rejected_payments_count;
+  document.getElementById('kpiCredits').textContent = d.bank_credits_count;
+
+  const pill = document.getElementById('reviewPill');
+  pill.textContent = d.pending_review_count;
+  pill.style.display = d.pending_review_count > 0 ? 'inline-block' : 'none';
+
+  document.getElementById('provBody').innerHTML = d.by_provider.length
+    ? d.by_provider.map(p => `<tr><td><strong>${esc(p.provider)}</strong></td><td>${p.payments}</td><td>${p.tickets}</td><td>${p.birr.toLocaleString(undefined,{minimumFractionDigits:2})} ETB</td></tr>`).join('')
+    : '<tr><td colspan="4" style="color:var(--muted)">No approved payments yet.</td></tr>';
+
+  document.getElementById('dailyBody').innerHTML = d.daily_breakdown.length
+    ? d.daily_breakdown.map(x => `<tr><td>${esc(x.date)}</td><td>${x.payments}</td><td>${x.tickets}</td><td>${x.birr.toLocaleString(undefined,{minimumFractionDigits:2})} ETB</td></tr>`).join('')
+    : '<tr><td colspan="4" style="color:var(--muted)">No sales yet.</td></tr>';
+
+  await loadHolders();
+}
+
+async function loadHolders() {
+  const q = encodeURIComponent(document.getElementById('searchBox').value || '');
+  const res = await fetch('/api/holders?search=' + q);
+  const d = await res.json();
+  const thead = document.getElementById('holdersThead');
+  const tbody = document.getElementById('holdersTbody');
+
+  if (viewMode === 'holders') {
+    thead.innerHTML = '<tr><th>Full Name</th><th>Bank Payer Name(s)</th><th>Telegram</th><th>Tickets</th><th>Total Paid</th><th>Lottery Numbers Assigned</th></tr>';
+    tbody.innerHTML = d.holders.length ? d.holders.map(h => `
+      <tr>
+        <td><strong>${esc(h.full_name)}</strong></td>
+        <td>${esc(h.bank_names_str) || '<span style="color:var(--muted)">-</span>'}</td>
+        <td>${esc(h.username)} <span style="color:var(--muted)">(${h.telegram_id})</span></td>
+        <td><strong>${h.ticket_count}</strong></td>
+        <td><strong>${h.total_birr.toLocaleString(undefined,{minimumFractionDigits:2})} ETB</strong></td>
+        <td>${h.formatted_numbers.map(n => `<span class="ticket-chip">${esc(n)}</span>`).join('')}</td>
+      </tr>`).join('') : '<tr><td colspan="6" style="color:var(--muted)">No lottery tickets issued yet.</td></tr>';
+  } else {
+    thead.innerHTML = '<tr><th>Ticket #</th><th>Holder Full Name</th><th>Bank Payer Name</th><th>Telegram</th><th>Amount</th><th>Tx Reference</th><th>Issued At</th></tr>';
+    tbody.innerHTML = d.tickets.length ? d.tickets.map(t => `
+      <tr>
+        <td><span class="ticket-chip">${esc(t.formatted)}</span></td>
+        <td><strong>${esc(t.full_name)}</strong></td>
+        <td>${esc(t.bank_sender) || '-'}</td>
+        <td>${esc(t.username)} (${t.telegram_id})</td>
+        <td>${t.amount.toLocaleString(undefined,{minimumFractionDigits:2})} ETB</td>
+        <td><code>${esc(t.transaction_id) || '-'}</code></td>
+        <td>${esc(t.issued_at)}</td>
+      </tr>`).join('') : '<tr><td colspan="7" style="color:var(--muted)">No lottery tickets issued yet.</td></tr>';
+  }
+}
+
+async function loadReviews() {
+  const res = await fetch('/api/reviews');
+  const d = await res.json();
+  const el = document.getElementById('reviewsList');
+  if (!d.reviews.length) {
+    el.innerHTML = '<p style="color:var(--muted)">🎉 Nothing waiting for review right now.</p>';
+    return;
+  }
+  el.innerHTML = d.reviews.map(r => `
+    <div class="review-card">
+      <a href="/api/payments/${r.id}/image" target="_blank">
+        <img class="review-img" src="/api/payments/${r.id}/image" alt="Receipt #${r.id}">
+      </a>
+      <div>
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+          <h3 style="margin:0;">Payment #${r.id} — ${esc(r.user_name)} ${esc(r.username)}</h3>
+          <small style="color:var(--muted)">${esc(r.created_at)}</small>
+        </div>
+        <p style="margin:8px 0; color:#991b1b;"><strong>Reason:</strong> ${esc(r.reason)}</p>
+        <p style="margin:6px 0; font-size:13px;">
+          <strong>Ref:</strong> <code>${esc(r.transaction_id) || '-'}</code> &nbsp;|&nbsp;
+          <strong>Screenshot Amt:</strong> ${esc(r.screenshot_amount ?? '-')} &nbsp;|&nbsp;
+          <strong>Bank Credit:</strong> ${r.credit_amount !== null ? `${r.credit_amount} ETB (${esc(r.credit_sender || '?')})` : 'None found'}
+          ${r.credit_claimed ? ' <strong style="color:var(--red)">(ALREADY CLAIMED!)</strong>' : ''}
+        </p>
+        <div style="display:flex; gap:10px; align-items:center; margin-top:12px; flex-wrap:wrap;">
+          <label style="font-size:13px; font-weight:600;">Tickets:
+            <input id="rv_n_${r.id}" type="number" min="1" max="100" value="${r.suggested_tickets}" style="width:75px; display:inline-block; margin-left:4px;">
+          </label>
+          <button class="btn-start" onclick="approveReview(${r.id})">✅ Approve &amp; Issue Tickets</button>
+          <button class="btn-stop" onclick="rejectReview(${r.id})">❌ Reject</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function approveReview(pid) {
+  const n = parseInt(document.getElementById('rv_n_' + pid).value || '1', 10);
+  const res = await fetch(`/api/reviews/${pid}/approve`, {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ tickets: n })
+  });
+  const d = await res.json();
+  if (!d.ok) return toast(d.error || 'Approve failed', true);
+  toast('Issued ticket(s): ' + d.numbers.join(', '));
+  loadReviews();
+  refreshDashboard();
+}
+
+async function rejectReview(pid) {
+  const res = await fetch(`/api/reviews/${pid}/reject`, {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({})
+  });
+  const d = await res.json();
+  if (!d.ok) return toast(d.error || 'Reject failed', true);
+  toast('Payment #' + pid + ' rejected.');
+  loadReviews();
+  refreshDashboard();
+}
+
+async function loadCredits() {
+  const res = await fetch('/api/credits');
+  const d = await res.json();
+  document.getElementById('creditsBody').innerHTML = d.credits.length
+    ? d.credits.map(c => `<tr><td>${c.id}</td><td><code>${esc(c.reference)}</code></td><td><strong>${c.amount.toLocaleString(undefined,{minimumFractionDigits:2})} ETB</strong></td><td>${esc(c.sender)}</td><td>${c.claimed_by_payment_id ? '#' + c.claimed_by_payment_id : '<span style="color:var(--green)">Available</span>'}</td><td>${esc(c.received_at)}</td></tr>`).join('')
+    : '<tr><td colspan="6" style="color:var(--muted)">No bank credits recorded yet.</td></tr>';
+}
+
+async function uploadCsvFile() {
+  const inp = document.getElementById('csvFileInput');
+  if (!inp.files.length) return toast('Please choose a CSV file first.', true);
+  const text = await inp.files[0].text();
+  const res = await fetch('/api/credits/import-csv', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ csv_text: text })
+  });
+  const d = await res.json();
+  if (!d.ok) return toast(d.error || 'Import failed', true);
+  toast(`Imported ${d.created} credits (${d.skipped} duplicates skipped).`);
+  loadCredits();
+}
+
+async function submitManualSms() {
+  const text = document.getElementById('manualSmsText').value;
+  const res = await fetch('/api/credits/sms', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ text })
+  });
+  const d = await res.json();
+  if (!d.ok) return toast(d.error || 'SMS failed', true);
+  toast(`SMS status: ${d.status}` + (d.reference ? ` (${d.reference}, ${d.amount} ETB)` : ''));
+  document.getElementById('manualSmsText').value = '';
+  loadCredits();
+}
+
+async function loadDrawStatus() {
+  const res = await fetch('/api/draw/status');
+  const d = await res.json();
+  document.getElementById('commitStatus').innerHTML = d.committed
+    ? `<span style="color:var(--green)"><strong>Commitment Hash:</strong><br>${esc(d.commitment)}</span>`
+    : '<span style="color:var(--muted)">No commitment generated yet.</span>';
+}
+
+async function doCommit() {
+  const res = await fetch('/api/draw/commit', { method: 'POST' });
+  const d = await res.json();
+  loadDrawStatus();
+  toast('Commitment hash ready! Share it publicly before drawing.');
+}
+
+async function doRunDraw() {
+  const entropy = document.getElementById('drawEntropy').value.trim();
+  const winners = parseInt(document.getElementById('drawWinners').value || '1', 10);
+  const one_per_person = document.getElementById('drawOnePer').checked;
+  const res = await fetch('/api/draw/run', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ entropy, winners, one_per_person })
+  });
+  const d = await res.json();
+  if (!d.ok) return toast(d.error || 'Draw failed', true);
+  document.getElementById('drawResult').innerHTML = `
+    <div class="alert alert-ok"><span>🏆 Draw completed across <strong>${d.total_tickets}</strong> tickets! Publish Seed: <code>${esc(d.seed)}</code></span></div>
+    <table>
+      <thead><tr><th>Rank</th><th>Winning Ticket</th><th>Holder Full Name</th><th>Telegram</th></tr></thead>
+      <tbody>${d.winners.map(w => `<tr><td><strong>#${w.rank}</strong></td><td><span class="ticket-chip">${esc(w.formatted)}</span></td><td><strong>${esc(w.full_name)}</strong></td><td>${esc(w.username)} (${w.telegram_id})</td></tr>`).join('')}</tbody>
+    </table>`;
+}
+
+function toggleDates() {
+  document.getElementById('dateFields').style.display = document.getElementById('cfg_unbounded').checked ? 'none' : 'grid';
+}
+function toggleClaude() {
+  document.getElementById('claudeFields').style.display = document.getElementById('cfg_extractor').value === 'claude' ? 'grid' : 'none';
+}
+function rebuildInstructions() {
+  const price = document.getElementById('cfg_ticket_price').value || '100';
+  const cbe = document.getElementById('cfg_cbe_acc').value.trim();
+  const cbeName = document.getElementById('cfg_cbe_name').value.trim();
+  const tb = document.getElementById('cfg_tb_num').value.trim();
+  const tbName = document.getElementById('cfg_tb_name').value.trim();
+  const lines = [`Pay ${price} ETB per ticket to:`];
+  if (tb) lines.push(`Telebirr: ${tb}${tbName ? ' (' + tbName + ')' : ''}`);
+  if (cbe) lines.push(`CBE: ${cbe}${cbeName ? ' (' + cbeName + ')' : ''}`);
+  document.getElementById('cfg_instructions').value = lines.length > 1 ? lines.join('\n') : 'Send your payment to our receiving account.';
+}
+function previewInstructions() {
+  if (!document.getElementById('cfg_instructions').dataset.edited) rebuildInstructions();
+}
+
+async function loadSettings() {
+  const res = await fetch('/api/settings');
+  const s = await res.json();
+  document.getElementById('cfg_campaign_name').value = s.campaign_name || '';
+  document.getElementById('cfg_bot_token').value = s.bot_token || '';
+  document.getElementById('cfg_admin_ids').value = s.admin_ids || '';
+  document.getElementById('cfg_ticket_price').value = s.ticket_price || '100';
+  document.getElementById('cfg_max_tickets').value = s.max_tickets_per_payment || 50;
+  document.getElementById('cfg_first_num').value = s.first_ticket_number || 1;
+  document.getElementById('cfg_ticket_width').value = s.ticket_width || 5;
+  document.getElementById('cfg_unbounded').checked = !!s.campaign_unbounded;
+  document.getElementById('cfg_start').value = s.campaign_start || '';
+  document.getElementById('cfg_end').value = s.campaign_end || '';
+  document.getElementById('cfg_cbe_acc').value = s.cbe_account || '';
+  document.getElementById('cfg_cbe_name').value = s.cbe_account_name || '';
+  document.getElementById('cfg_tb_num').value = s.telebirr_number || '';
+  document.getElementById('cfg_tb_name').value = s.telebirr_name || '';
+  document.getElementById('cfg_instructions').value = s.payment_instructions || '';
+  if (s.payment_instructions && !s.payment_instructions.includes('<ACCOUNT DETAILS')) {
+    document.getElementById('cfg_instructions').dataset.edited = '1';
+  }
+  document.getElementById('cfg_wait').value = s.credit_wait_minutes ?? 2;
+  document.getElementById('cfg_retry').value = s.retry_interval_seconds ?? 15;
+  document.getElementById('cfg_sms_secret').value = s.sms_secret || '';
+  document.getElementById('cfg_extractor').value = s.extractor || 'tesseract';
+  document.getElementById('cfg_api_key').value = s.anthropic_api_key || '';
+  document.getElementById('cfg_claude_model').value = s.claude_model || 'claude-sonnet-5-5';
+  document.getElementById('cfg_auto_start').checked = !!s.auto_start_bot;
+  document.getElementById('cfg_lan').checked = (s.web_host === '0.0.0.0');
+  if (s.is_windows) document.getElementById('btnShortcut').style.display = 'inline-flex';
+  toggleDates();
+  toggleClaude();
+
+  if (!firstLoadDone) {
+    firstLoadDone = true;
+    if (!s.is_configured) showTab('settings');
+  }
+}
+
+document.getElementById('cfg_instructions').addEventListener('input', e => {
+  e.target.dataset.edited = '1';
+});
+
+async function verifyToken() {
+  const token = document.getElementById('cfg_bot_token').value.trim();
+  const out = document.getElementById('tokenCheckResult');
+  out.textContent = 'Checking Telegram API...';
+  const res = await fetch('/api/verify-token', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ bot_token: token })
+  });
+  const d = await res.json();
+  if (d.ok) {
+    out.innerHTML = `<span style="color:var(--green)">✅ Verified: <strong>${esc(d.first_name)}</strong> (@${esc(d.username)})</span>`;
+    if (!document.getElementById('cfg_campaign_name').value || document.getElementById('cfg_campaign_name').value === 'Telegram Lottery') {
+      document.getElementById('cfg_campaign_name').value = d.first_name;
+    }
+  } else {
+    out.innerHTML = `<span style="color:var(--red)">❌ ${esc(d.error)}</span>`;
+  }
+}
+
+async function saveSettings(ev, startAfter) {
+  if (ev) ev.preventDefault();
+  const payload = {
+    campaign_name: document.getElementById('cfg_campaign_name').value,
+    bot_token: document.getElementById('cfg_bot_token').value,
+    admin_ids: document.getElementById('cfg_admin_ids').value,
+    ticket_price: document.getElementById('cfg_ticket_price').value,
+    max_tickets_per_payment: parseInt(document.getElementById('cfg_max_tickets').value, 10),
+    first_ticket_number: parseInt(document.getElementById('cfg_first_num').value, 10),
+    ticket_width: parseInt(document.getElementById('cfg_ticket_width').value, 10),
+    campaign_unbounded: document.getElementById('cfg_unbounded').checked,
+    campaign_start: document.getElementById('cfg_start').value,
+    campaign_end: document.getElementById('cfg_end').value,
+    cbe_account: document.getElementById('cfg_cbe_acc').value,
+    cbe_account_name: document.getElementById('cfg_cbe_name').value,
+    telebirr_number: document.getElementById('cfg_tb_num').value,
+    telebirr_name: document.getElementById('cfg_tb_name').value,
+    payment_instructions: document.getElementById('cfg_instructions').value,
+    credit_wait_minutes: parseInt(document.getElementById('cfg_wait').value, 10),
+    retry_interval_seconds: parseInt(document.getElementById('cfg_retry').value, 10),
+    sms_secret: document.getElementById('cfg_sms_secret').value,
+    extractor: document.getElementById('cfg_extractor').value,
+    anthropic_api_key: document.getElementById('cfg_api_key').value,
+    claude_model: document.getElementById('cfg_claude_model').value,
+    auto_start_bot: document.getElementById('cfg_auto_start').checked,
+    web_host: document.getElementById('cfg_lan').checked ? '0.0.0.0' : '127.0.0.1',
+    start_after_save: startAfter,
+  };
+  const res = await fetch('/api/settings', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
+  });
+  const d = await res.json();
+  if (!d.ok) return toast(d.error || 'Could not save settings', true);
+  renderStatus(d.status);
+  if (d.status.status === 'error') {
+    toast(d.status.error || 'Settings saved, but bot failed to start', true);
+  } else {
+    toast(startAfter ? 'Settings saved & Bot Service started!' : 'Settings saved!');
+    if (startAfter) showTab('dashboard');
+  }
+  refreshDashboard();
+}
+
+async function createShortcut() {
+  const res = await fetch('/api/windows/shortcut', { method: 'POST' });
+  const d = await res.json();
+  if (!d.ok) return toast(d.error || 'Failed', true);
+  toast('Desktop shortcut created: ' + d.path);
+}
+
+async function loadLogs() {
+  const res = await fetch('/api/logs');
+  const d = await res.json();
+  const box = document.getElementById('logBox');
+  box.textContent = d.logs.length ? d.logs.map(l => l.line).join('\n') : 'No logs yet.';
+  box.scrollTop = box.scrollHeight;
+}
+
+loadSettings().then(() => refreshDashboard());
+setInterval(() => {
+  refreshDashboard();
+  if (document.getElementById('tab-logs').classList.contains('active')) loadLogs();
+}, 4000);
+</script>
+</body>
+</html>

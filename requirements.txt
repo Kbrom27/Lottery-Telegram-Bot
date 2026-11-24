@@ -1,0 +1,11 @@
+aiogram>=3.13,<4
+fastapi>=0.115
+uvicorn[standard]>=0.30
+SQLAlchemy[asyncio]>=2.0.30
+asyncpg>=0.29
+aiosqlite>=0.20
+Pillow>=10.3
+pytesseract>=0.3.10    # EXTRACTOR=tesseract (also needs the tesseract binary)
+anthropic>=0.40        # only used when EXTRACTOR=claude
+zxing-cpp>=3.0
+openpyxl>=3.1.0
