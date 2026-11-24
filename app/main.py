@@ -1,8 +1,9 @@
-"""Entry point: FastAPI app that also runs the Telegram bot and the verification worker.
+"""Entry point: FastAPI app that runs the Web Dashboard, Telegram bot, and verification worker.
 
     uvicorn app.main:app --host 0.0.0.0 --port 8000        (run ONE process; scale workers later)
 
 Routes:
+    GET  /                    Web Dashboard, Reports, and Excel Exports
     POST /sms                 receives "money received" SMS from the SMS-forwarder app
     POST /telegram/{secret}   Telegram webhook (only if WEBHOOK_BASE_URL is set; else long polling)
     GET  /healthz
@@ -13,67 +14,94 @@ import asyncio
 import hmac
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
+from dataclasses import replace
+from pathlib import Path
 
 from aiogram import Bot
 from aiogram.types import Update
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from .bot import build_dispatcher, make_review_notifier, safe_send
-from .config import Settings, get_settings
-from .db import init_db, make_engine, make_sessionmaker
+from .config import Settings, get_settings, load_desktop_settings, resolve_data_dir
 from .extract import make_extractor
+from .service_manager import BotServiceManager
 from .sms import ingest_sms
+from .web_ui import mount_web_routes
 from .worker import Worker
 
 log = logging.getLogger("main")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    settings = settings or get_settings()
+    if settings is None:
+        env_settings = get_settings()
+        data_dir = Path(env_settings.storage_dir).parent if env_settings.storage_dir else resolve_data_dir()
+        if (data_dir / "config.json").exists():
+            settings = load_desktop_settings(data_dir)
+            if os.environ.get("DATABASE_URL"):
+                settings = replace(settings, database_url=env_settings.database_url)
+            if os.environ.get("STORAGE_DIR"):
+                settings = replace(settings, storage_dir=env_settings.storage_dir)
+        else:
+            settings = env_settings
+    else:
+        data_dir = Path(settings.storage_dir).parent if settings.storage_dir else resolve_data_dir()
+    manager = BotServiceManager(data_dir=data_dir, settings=settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-        if settings.webhook_base_url and not settings.webhook_secret:
+        if manager.settings.webhook_base_url and not manager.settings.webhook_secret:
             raise RuntimeError("WEBHOOK_SECRET is required when WEBHOOK_BASE_URL is set")
-        engine = make_engine(settings.database_url)
-        sm = make_sessionmaker(engine)
-        await init_db(engine, settings)
+        await manager.init_database()
+        app.state.sm = manager.sm
 
-        bot = Bot(settings.bot_token)
-        dp = build_dispatcher(sm, settings)
+        webhook_tasks: list[asyncio.Task] = []
+        if manager.settings.webhook_base_url:
+            bot = Bot(manager.settings.bot_token)
+            dp = build_dispatcher(manager.sm, manager.settings)
 
-        async def fetch_file(file_id: str) -> bytes:
-            f = await bot.get_file(file_id)
-            buf = await bot.download_file(f.file_path)
-            return buf.read()
+            async def fetch_file(file_id: str) -> bytes:
+                f = await bot.get_file(file_id)
+                buf = await bot.download_file(f.file_path)
+                return buf.read()
 
-        async def notify(tg_id: int, text: str) -> None:
-            await safe_send(bot, tg_id, text)
+            async def notify(tg_id: int, text: str) -> None:
+                await safe_send(bot, tg_id, text)
 
-        worker = Worker(sm, settings, make_extractor(settings), fetch_file, notify, make_review_notifier(bot, sm, settings))
-        tasks = [asyncio.create_task(worker.run_forever())]
-        if settings.webhook_base_url:
-            await bot.set_webhook(
-                f"{settings.webhook_base_url}/telegram/{settings.webhook_secret}",
-                secret_token=settings.webhook_secret,
+            worker = Worker(
+                manager.sm,
+                manager.settings,
+                make_extractor(manager.settings),
+                fetch_file,
+                notify,
+                make_review_notifier(bot, manager.sm, manager.settings),
             )
-        else:
-            await bot.delete_webhook()
-            tasks.append(asyncio.create_task(dp.start_polling(bot, handle_signals=False)))
+            webhook_tasks = [asyncio.create_task(worker.run_forever())]
+            await bot.set_webhook(
+                f"{manager.settings.webhook_base_url}/telegram/{manager.settings.webhook_secret}",
+                secret_token=manager.settings.webhook_secret,
+            )
+            app.state.bot, app.state.dp = bot, dp
+            manager.bot, manager.dp, manager.status = bot, dp, "running"
+        elif manager.settings.is_configured:
+            await manager.start()
+            app.state.bot, app.state.dp = manager.bot, manager.dp
 
-        app.state.sm, app.state.bot, app.state.dp = sm, bot, dp
         try:
             yield
         finally:
-            for t in tasks:
+            for t in webhook_tasks:
                 t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await bot.session.close()
-            await engine.dispose()
+            if webhook_tasks:
+                await asyncio.gather(*webhook_tasks, return_exceptions=True)
+            await manager.shutdown()
 
     app = FastAPI(title="Lottery bot", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.manager = manager
+    mount_web_routes(app, manager)
 
     @app.get("/healthz")
     async def healthz():
@@ -81,8 +109,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/sms")
     async def sms(request: Request, x_secret: str = Header(default=""), key: str = ""):
+        secret = manager.settings.sms_secret
         supplied = (x_secret or key).encode()
-        if not settings.sms_secret or not hmac.compare_digest(supplied, settings.sms_secret.encode()):
+        if not secret or not hmac.compare_digest(supplied, secret.encode()):
             raise HTTPException(status_code=401)
         raw = await request.body()
         try:
@@ -93,7 +122,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not text:
             raise HTTPException(status_code=400, detail="no text")
         async with app.state.sm() as s, s.begin():
-            status, _ = await ingest_sms(s, text)  # arrival time = now (never trust the sender's clock)
+            status, _ = await ingest_sms(s, text)
         log.info("sms %s", status)
         return {"status": status}
 
@@ -101,9 +130,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def telegram_webhook(
         secret: str, request: Request, x_telegram_bot_api_secret_token: str = Header(default="")
     ):
-        if not settings.webhook_secret or not (
-            hmac.compare_digest(secret.encode(), settings.webhook_secret.encode())
-            and hmac.compare_digest(x_telegram_bot_api_secret_token.encode(), settings.webhook_secret.encode())
+        if not manager.settings.webhook_secret or not (
+            hmac.compare_digest(secret.encode(), manager.settings.webhook_secret.encode())
+            and hmac.compare_digest(x_telegram_bot_api_secret_token.encode(), manager.settings.webhook_secret.encode())
         ):
             raise HTTPException(status_code=401)
         update = Update.model_validate(await request.json(), context={"bot": app.state.bot})

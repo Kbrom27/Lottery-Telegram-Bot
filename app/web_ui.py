@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import hmac
 import io
 import json
@@ -11,6 +10,7 @@ import os
 import secrets
 import subprocess
 import sys
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
 
@@ -49,48 +49,18 @@ def _template_path() -> Path:
     return Path(__file__).resolve().parent / "web_dashboard.html"
 
 
-def create_web_app(manager: BotServiceManager) -> FastAPI:
-    from contextlib import asynccontextmanager
+def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
+    """Attach the Web Dashboard, Setup/Settings, Review Queue, Draw, and Excel Export routes."""
 
-    @asynccontextmanager
-    async def lifespan(_app: FastAPI):
-        await manager.init_database()
-        if manager.settings.is_configured and manager.settings.auto_start_bot:
-            await manager.start()
-        try:
-            yield
-        finally:
-            await manager.shutdown()
+    def _sm():
+        return manager.sm or getattr(app.state, "sm", None)
 
-    app = FastAPI(title="LotteryBot Control Center", lifespan=lifespan, docs_url=None, redoc_url=None)
-    app.state.manager = manager
+    def _bot():
+        return manager.bot or getattr(app.state, "bot", None)
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
         return HTMLResponse(_template_path().read_text(encoding="utf-8"))
-
-    @app.get("/healthz")
-    async def healthz():
-        return {"ok": True, "app": "lotterybot", "status": manager.status}
-
-    @app.post("/sms")
-    async def sms_webhook(request: Request, x_secret: str = Header(default=""), key: str = ""):
-        secret = manager.settings.sms_secret
-        supplied = (x_secret or key).encode()
-        if not secret or not hmac.compare_digest(supplied, secret.encode()):
-            raise HTTPException(status_code=401)
-        raw = await request.body()
-        try:
-            body = json.loads(raw)
-            text = (body.get("text") or body.get("message") or body.get("body") or "") if isinstance(body, dict) else ""
-        except ValueError:
-            text = raw.decode(errors="ignore")
-        if not text:
-            raise HTTPException(status_code=400, detail="no text")
-        async with manager.sm() as s, s.begin():
-            status, _ = await ingest_sms(s, text)
-        log.info("sms %s", status)
-        return {"status": status}
 
     @app.get("/api/status")
     async def api_status():
@@ -106,7 +76,11 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
     async def api_save_settings(request: Request):
         body = await request.json()
         start_after = bool(body.pop("start_after_save", False))
-        # Auto-rebuild instructions if user requested or left custom blank
+        # Preserve Docker container database/storage overrides if explicitly set in env
+        if os.environ.get("DATABASE_URL"):
+            body["database_url"] = os.environ["DATABASE_URL"]
+        if os.environ.get("STORAGE_DIR"):
+            body["storage_dir"] = os.environ["STORAGE_DIR"]
         if body.pop("auto_build_instructions", False):
             body["payment_instructions"] = build_payment_instructions(
                 body.get("ticket_price", "100"),
@@ -118,6 +92,7 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
             )
         try:
             st = await manager.apply_settings(body, start_after=start_after)
+            app.state.sm = manager.sm
             return {"ok": True, "status": st, "settings": manager.settings.to_ui_dict()}
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -142,7 +117,9 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
 
     @app.post("/api/service/start")
     async def api_start():
-        return await manager.start()
+        st = await manager.start()
+        app.state.sm = manager.sm
+        return st
 
     @app.post("/api/service/stop")
     async def api_stop():
@@ -150,23 +127,25 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
 
     @app.post("/api/service/restart")
     async def api_restart():
-        return await manager.restart()
+        st = await manager.restart()
+        app.state.sm = manager.sm
+        return st
 
     @app.get("/api/dashboard")
     async def api_dashboard():
-        async with manager.sm() as s:
+        async with _sm()() as s:
             summary = await get_dashboard_summary(s, manager.settings)
         summary["service"] = manager.status_dict()
         return summary
 
     @app.get("/api/holders")
     async def api_holders(search: str = ""):
-        async with manager.sm() as s:
+        async with _sm()() as s:
             return await get_holders_data(s, manager.settings, search=search)
 
     @app.get("/api/reviews")
     async def api_reviews():
-        async with manager.sm() as s:
+        async with _sm()() as s:
             rows = (
                 await s.execute(
                     select(Payment, User)
@@ -207,23 +186,24 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
 
     @app.get("/api/payments/{pid}/image")
     async def api_payment_image(pid: int):
-        async with manager.sm() as s:
+        async with _sm()() as s:
             p = await s.get(Payment, pid)
         if not p:
             raise HTTPException(status_code=404)
         if p.image_path and os.path.exists(p.image_path):
             with open(p.image_path, "rb") as f:
                 return Response(content=f.read(), media_type="image/jpeg")
-        if manager.bot is not None and p.tg_file_id:
+        bot = _bot()
+        if bot is not None and p.tg_file_id:
             try:
-                f_info = await manager.bot.get_file(p.tg_file_id)
-                buf = await manager.bot.download_file(f_info.file_path)
+                f_info = await bot.get_file(p.tg_file_id)
+                buf = await bot.download_file(f_info.file_path)
                 data = buf.read()
                 os.makedirs(manager.settings.storage_dir, exist_ok=True)
                 path = os.path.join(manager.settings.storage_dir, f"{p.id}.img")
                 with open(path, "wb") as out_f:
                     out_f.write(data)
-                async with manager.sm() as s, s.begin():
+                async with _sm()() as s, s.begin():
                     (await s.get(Payment, p.id)).image_path = path
                 return Response(content=data, media_type="image/jpeg")
             except Exception:
@@ -235,7 +215,7 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
         body = await request.json()
         n = max(1, int(body.get("tickets", 1)))
         try:
-            async with manager.sm() as s, s.begin():
+            async with _sm()() as s, s.begin():
                 p = await s.get(Payment, pid)
                 if not p:
                     return JSONResponse({"ok": False, "error": "Payment not found"}, status_code=404)
@@ -251,8 +231,9 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
         formatted = [manager.settings.fmt(x) for x in numbers]
-        if manager.bot is not None:
-            await safe_send(manager.bot, tg_id, M.APPROVED.format(numbers=", ".join(formatted)))
+        bot = _bot()
+        if bot is not None:
+            await safe_send(bot, tg_id, M.APPROVED.format(numbers=", ".join(formatted)))
         return {"ok": True, "numbers": formatted}
 
     @app.post("/api/reviews/{pid}/reject")
@@ -260,18 +241,19 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
         body = await request.json()
         reason = str(body.get("reason") or M.ADMIN_REJECTED).strip()
         try:
-            async with manager.sm() as s, s.begin():
+            async with _sm()() as s, s.begin():
                 p = await reject(s, pid, reason, "web_admin")
                 tg_id = (await s.get(User, p.user_id)).telegram_id
         except InvalidState as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-        if manager.bot is not None:
-            await safe_send(manager.bot, tg_id, reason)
+        bot = _bot()
+        if bot is not None:
+            await safe_send(bot, tg_id, reason)
         return {"ok": True}
 
     @app.get("/api/credits")
     async def api_credits():
-        async with manager.sm() as s:
+        async with _sm()() as s:
             rows = (await s.execute(select(BankCredit).order_by(desc(BankCredit.id)).limit(200))).scalars().all()
         return {
             "credits": [
@@ -296,7 +278,7 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
         created = skipped = 0
         try:
             reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))
-            async with manager.sm() as s, s.begin():
+            async with _sm()() as s, s.begin():
                 for row in reader:
                     ref = normalize_ref(row["reference"])
                     amt = Decimal(str(row["amount"]).replace(",", ""))
@@ -313,7 +295,7 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
         text = str(body.get("text") or "").strip()
         if not text:
             return JSONResponse({"ok": False, "error": "Please enter SMS text"}, status_code=400)
-        async with manager.sm() as s, s.begin():
+        async with _sm()() as s, s.begin():
             status, credit = await ingest_sms(s, text)
         return {
             "ok": True,
@@ -324,7 +306,7 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
 
     @app.get("/api/export/excel")
     async def api_export_excel():
-        async with manager.sm() as s:
+        async with _sm()() as s:
             data, _ = await build_holders_excel(s, manager.settings)
         return Response(
             content=data,
@@ -334,7 +316,7 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
 
     @app.get("/api/export/report")
     async def api_export_report():
-        async with manager.sm() as s:
+        async with _sm()() as s:
             data = await build_summary_report_excel(s, manager.settings)
         return Response(
             content=data,
@@ -345,7 +327,7 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
     @app.get("/api/export/csv")
     async def api_export_csv(public: int = 0):
         is_pub = bool(public)
-        async with manager.sm() as s:
+        async with _sm()() as s:
             data, _ = await build_tickets_csv(s, manager.settings, public=is_pub)
         name = "tickets_public.csv" if is_pub else "tickets_full.csv"
         return Response(
@@ -365,6 +347,7 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
     @app.post("/api/draw/commit")
     async def api_draw_commit():
         seed_path = manager.data_dir / "draw_seed.txt"
+        manager.data_dir.mkdir(parents=True, exist_ok=True)
         if not seed_path.exists():
             seed = secrets.token_hex(32)
             seed_path.write_text(seed, encoding="utf-8")
@@ -376,7 +359,9 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
     async def api_draw_run(request: Request):
         seed_path = manager.data_dir / "draw_seed.txt"
         if not seed_path.exists():
-            return JSONResponse({"ok": False, "error": "Please click 'Generate Commitment' before running the draw."}, status_code=400)
+            return JSONResponse(
+                {"ok": False, "error": "Please click 'Generate Commitment' before running the draw."}, status_code=400
+            )
         body = await request.json()
         entropy = str(body.get("entropy") or "").strip()
         if not entropy:
@@ -384,7 +369,7 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
         winners_n = max(1, int(body.get("winners", 1)))
         one_per_person = bool(body.get("one_per_person", True))
 
-        async with manager.sm() as s:
+        async with _sm()() as s:
             rows = (
                 await s.execute(
                     select(Ticket.number, User.telegram_id, User.full_name, User.username)
@@ -395,7 +380,10 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
         if not rows:
             return JSONResponse({"ok": False, "error": "No tickets have been issued yet."}, status_code=400)
 
-        by_num = {int(n): {"full_name": fn or "", "username": f"@{un}" if un else "", "telegram_id": int(tg)} for n, tg, fn, un in rows}
+        by_num = {
+            int(n): {"full_name": fn or "", "username": f"@{un}" if un else "", "telegram_id": int(tg)}
+            for n, tg, fn, un in rows
+        }
         pool = [(int(n), str(tg)) for n, tg, _fn, _un in rows]
         seed = seed_path.read_text(encoding="utf-8").strip()
         picked = draw_lib.pick_winners(seed, entropy, pool, winners_n, one_per_person)
@@ -445,5 +433,44 @@ def create_web_app(manager: BotServiceManager) -> FastAPI:
             return {"ok": True, "path": str(lnk)}
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+def create_web_app(manager: BotServiceManager) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        await manager.init_database()
+        if manager.settings.is_configured and manager.settings.auto_start_bot:
+            await manager.start()
+        try:
+            yield
+        finally:
+            await manager.shutdown()
+
+    app = FastAPI(title="LotteryBot Control Center", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app.state.manager = manager
+    mount_web_routes(app, manager)
+
+    @app.get("/healthz")
+    async def healthz():
+        return {"ok": True, "app": "lotterybot", "status": manager.status}
+
+    @app.post("/sms")
+    async def sms_webhook(request: Request, x_secret: str = Header(default=""), key: str = ""):
+        secret = manager.settings.sms_secret
+        supplied = (x_secret or key).encode()
+        if not secret or not hmac.compare_digest(supplied, secret.encode()):
+            raise HTTPException(status_code=401)
+        raw = await request.body()
+        try:
+            body = json.loads(raw)
+            text = (body.get("text") or body.get("message") or body.get("body") or "") if isinstance(body, dict) else ""
+        except ValueError:
+            text = raw.decode(errors="ignore")
+        if not text:
+            raise HTTPException(status_code=400, detail="no text")
+        async with manager.sm() as s, s.begin():
+            status, _ = await ingest_sms(s, text)
+        log.info("sms %s", status)
+        return {"status": status}
 
     return app
