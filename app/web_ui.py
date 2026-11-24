@@ -419,18 +419,27 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
         if sys.platform != "win32":
             return JSONResponse({"ok": False, "error": "Desktop shortcut creation is only supported on Windows."}, status_code=400)
         try:
-            target = sys.executable
-            workdir = str(Path(target).resolve().parent)
-            desktop = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
-            lnk = desktop / "LotteryBot.lnk"
+            target = sys.executable.replace("'", "''")
+            workdir = str(Path(sys.executable).resolve().parent).replace("'", "''")
             ps = (
-                f'$s=(New-Object -COM WScript.Shell).CreateShortcut("{lnk}");'
-                f'$s.TargetPath="{target}";'
-                f'$s.WorkingDirectory="{workdir}";'
-                f'$s.Save()'
+                "$desktop = [Environment]::GetFolderPath('Desktop');"
+                "if (-not $desktop) { $desktop = Join-Path $env:USERPROFILE 'Desktop' };"
+                "$lnk = Join-Path $desktop 'LotteryBot.lnk';"
+                "$s = (New-Object -COM WScript.Shell).CreateShortcut($lnk);"
+                f"$s.TargetPath = '{target}';"
+                f"$s.WorkingDirectory = '{workdir}';"
+                "$s.Save();"
+                "Write-Output $lnk"
             )
-            subprocess.run(["powershell", "-NoProfile", "-Command", ps], check=True)
-            return {"ok": True, "path": str(lnk)}
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            stdout_lines = [line.strip() for line in (res.stdout or "").splitlines() if line.strip()]
+            lnk_path = stdout_lines[-1] if stdout_lines else "Desktop\\LotteryBot.lnk"
+            return {"ok": True, "path": lnk_path}
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 

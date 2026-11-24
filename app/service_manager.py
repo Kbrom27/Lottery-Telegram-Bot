@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from aiogram import Bot
+from sqlalchemy import func, select, update
 
 from .bot import build_dispatcher, make_review_notifier, safe_send
 from .config import Settings, load_desktop_settings, resolve_data_dir, save_desktop_settings
 from .db import init_db, is_sqlite_url, make_engine, make_sessionmaker
 from .extract import find_tesseract_cmd, make_extractor
+from .models import Counter, Ticket
 from .worker import Worker
 
 log = logging.getLogger("service_manager")
@@ -212,6 +214,16 @@ class BotServiceManager:
                 await self.init_database()
             else:
                 await init_db(self.engine, self.settings)
+
+            if self.sm is not None:
+                async with self.sm() as s, s.begin():
+                    issued = await s.scalar(select(func.count(Ticket.number))) or 0
+                    if issued == 0:
+                        await s.execute(
+                            update(Counter)
+                            .where(Counter.id == 1)
+                            .values(next_number=self.settings.first_ticket_number)
+                        )
 
             self.last_error = None
             if start_after or was_running:

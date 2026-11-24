@@ -11,7 +11,7 @@ import hashlib
 import io
 import logging
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Awaitable, Callable
 
@@ -169,12 +169,23 @@ class Worker:
                     tg_id,
                 )
             if target_suffix and target_suffix in credit_acc:
+                received_at = None
+                raw_ts = vc.get("received_at")
+                if isinstance(raw_ts, str) and raw_ts.strip():
+                    try:
+                        parsed_ts = datetime.fromisoformat(raw_ts.strip().replace("Z", "+00:00"))
+                        if parsed_ts.tzinfo is None:
+                            parsed_ts = parsed_ts.replace(tzinfo=timezone.utc)
+                        received_at = parsed_ts
+                    except ValueError:
+                        received_at = None
                 async with self.sm() as s, s.begin():
                     await add_credit(
                         s,
                         reference=vc["reference"],
                         amount=Decimal(vc["amount"]),
                         sender=vc.get("sender"),
+                        received_at=received_at,
                         raw_text=vc.get("raw_text"),
                     )
 

@@ -216,6 +216,8 @@ def _try_cbe_url(text: str, raw_text: str | None = None, source: str = "QR") -> 
     amt = Decimal(str(amt_str))
     sender = data.get("debitAccountHolder") or data.get("creditAccountHolder")
     receiver = data.get("creditAccountNo")
+    dts = data.get("dateTimes")
+    received_at = dts[0].strip() if isinstance(dts, list) and dts and isinstance(dts[0], str) and dts[0].strip() else None
     return Extracted(
         transaction_id=ref,
         amount=amt,
@@ -228,6 +230,7 @@ def _try_cbe_url(text: str, raw_text: str | None = None, source: str = "QR") -> 
             "amount": str(amt),
             "sender": sender,
             "credit_account": receiver,
+            "received_at": received_at,
             "raw_text": f"CBE {source} Verified: {token}",
         },
     )

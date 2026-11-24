@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 import io
+from datetime import datetime, timezone
 from decimal import Decimal
+from unittest.mock import patch
 
 import httpx
 import openpyxl
 import pytest
+from sqlalchemy import select
 
+import desktop_launcher
 import draw as draw_lib
 from app.config import Settings, load_desktop_settings
-from app.extract import Extracted
-from app.models import Payment, Ticket, User
+from app.extract import Extracted, _try_cbe_url
+from app.models import BankCredit, Counter, Payment, Ticket, User
 from app.service import approve
 from app.service_manager import BotServiceManager
 from app.sms import add_credit
@@ -206,3 +210,174 @@ async def test_multi_ticket_allocation_dashboard_and_excel_export_sqlite(web_env
     assert len(revs) == 1
     app_res = (await client.post(f"/api/reviews/{revs[0]['id']}/approve", json={"tickets": 1})).json()
     assert app_res["ok"] is True and app_res["numbers"] == ["#00010"]
+
+
+async def test_saving_first_ticket_number_syncs_counter_only_when_no_tickets_issued(web_env):
+    client, manager = web_env
+    res = await client.post(
+        "/api/settings",
+        json={
+            "campaign_name": "Custom Start Test",
+            "bot_token": "999999:TEST_TOKEN_ABCDEFGHIJKLMNOP",
+            "admin_ids": "123456789",
+            "first_ticket_number": 500,
+            "ticket_width": 5,
+            "campaign_unbounded": True,
+        },
+    )
+    assert res.status_code == 200
+    dash = (await client.get("/api/dashboard")).json()
+    assert dash["next_ticket_number"] == 500
+    assert dash["next_ticket_formatted"] == "#00500"
+
+    # Issue one ticket via DB/service, then change first_ticket_number again: Counter must stay at 501.
+    async with manager.sm() as s, s.begin():
+        u = User(telegram_id=88001, full_name="First Holder", username="first")
+        s.add(u)
+        await s.flush()
+        p = Payment(user_id=u.id, tg_file_id="f500", image_sha256="b" * 64, status="review")
+        s.add(p)
+        await s.flush()
+        pid = p.id
+    async with manager.sm() as s, s.begin():
+        nums = await approve(s, pid, 1, "test")
+    assert nums == [500]
+
+    res2 = await client.post(
+        "/api/settings",
+        json={
+            "campaign_name": "Custom Start Test",
+            "bot_token": "999999:TEST_TOKEN_ABCDEFGHIJKLMNOP",
+            "admin_ids": "123456789",
+            "first_ticket_number": 900,
+            "ticket_width": 5,
+            "campaign_unbounded": True,
+        },
+    )
+    assert res2.status_code == 200
+    async with manager.sm() as s:
+        ctr = await s.get(Counter, 1)
+        assert ctr.next_number == 501
+
+
+async def test_cbe_qr_verified_credit_preserves_received_at_for_campaign_window(tmp_path):
+    mock_tx = {
+        "id": "FT25001OLDTX",
+        "status": "COMPLETED",
+        "amountCredited": "100.00",
+        "debitAccountHolder": "Old Sender",
+        "creditAccountNo": "1000999888777",
+        "dateTimes": ["2025-01-01T10:00:00Z"],
+    }
+    with patch("app.extract.fetch_cbe_transaction_detail", return_value=mock_tx):
+        ex = _try_cbe_url("https://mbreciept.cbe.com.et/tok123", source="QR")
+    assert ex is not None
+    assert ex.verified_bank_credit["received_at"] == "2025-01-01T10:00:00Z"
+
+    data_dir = tmp_path / "window_data"
+    data_dir.mkdir()
+    settings = Settings(
+        campaign_name="Bounded Campaign",
+        bot_token="999999:TEST_TOKEN_ABCDEFGHIJKLMNOP",
+        admin_ids=frozenset({123456789}),
+        database_url=f"sqlite+aiosqlite:///{data_dir / 'window.db'}",
+        storage_dir=str(data_dir / "receipts"),
+        cbe_account="1000999888777",
+        campaign_unbounded=False,
+        campaign_start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        campaign_end=datetime(2026, 12, 31, 23, 59, 59, tzinfo=timezone.utc),
+    )
+    manager = BotServiceManager(data_dir=data_dir, settings=settings)
+    await manager.init_database()
+    try:
+        from PIL import Image
+
+        buf1 = io.BytesIO()
+        Image.new("RGB", (64, 64), (255, 255, 255)).save(buf1, format="PNG")
+        buf2 = io.BytesIO()
+        Image.new("RGB", (64, 64), (200, 10, 10)).save(buf2, format="PNG")
+        img_map = {"old_qr": buf1.getvalue(), "good_qr": buf2.getvalue()}
+
+        class FakeQRExtractor:
+            def __init__(self, extracted):
+                self.extracted = extracted
+
+            def extract(self, _image: bytes) -> Extracted:
+                return self.extracted
+
+        async def fetch_file(fid: str) -> bytes:
+            return img_map[fid]
+
+        notifications = []
+
+        async def notify(tg_id: int, text: str) -> None:
+            notifications.append((tg_id, text))
+
+        async with manager.sm() as s, s.begin():
+            u = User(telegram_id=99001, full_name="Window Tester", username="wintester")
+            s.add(u)
+            await s.flush()
+            p_old = Payment(user_id=u.id, tg_file_id="old_qr", image_sha256="c" * 64, status="received")
+            s.add(p_old)
+            await s.flush()
+            p_old_id = p_old.id
+
+        w_old = Worker(
+            manager.sm,
+            settings,
+            FakeQRExtractor(ex),
+            fetch_file,
+            notify,
+        )
+        claimed_old = await w_old.claim_next()
+        assert claimed_old == p_old_id
+        await w_old.process(claimed_old)
+
+        async with manager.sm() as s:
+            pay = await s.get(Payment, p_old_id)
+            cred = (await s.execute(select(BankCredit).where(BankCredit.reference == "FT25001OLDTX"))).scalar_one()
+            assert pay.status == "rejected"
+            assert cred.received_at == datetime(2025, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+
+        # Now send an in-window CBE QR receipt and confirm it is approved.
+        mock_in_window = dict(mock_tx, id="FT26060GOOD1", dateTimes=["2026-06-01T12:00:00Z"])
+        with patch("app.extract.fetch_cbe_transaction_detail", return_value=mock_in_window):
+            ex_good = _try_cbe_url("https://mbreciept.cbe.com.et/tok456", source="QR")
+
+        async with manager.sm() as s, s.begin():
+            u = (await s.execute(select(User).where(User.telegram_id == 99001))).scalar_one()
+            p_good = Payment(user_id=u.id, tg_file_id="good_qr", image_sha256="d" * 64, status="received")
+            s.add(p_good)
+            await s.flush()
+            p_good_id = p_good.id
+
+        w_good = Worker(
+            manager.sm,
+            settings,
+            FakeQRExtractor(ex_good),
+            fetch_file,
+            notify,
+        )
+        claimed_good = await w_good.claim_next()
+        assert claimed_good == p_good_id
+        await w_good.process(claimed_good)
+
+        async with manager.sm() as s:
+            pay_good = await s.get(Payment, p_good_id)
+            assert pay_good.status == "approved"
+    finally:
+        await manager.shutdown()
+
+
+def test_find_existing_instance_scans_port_range():
+    def fake_in_use(port: int, _host: str = "127.0.0.1") -> bool:
+        return port in (8000, 8002)
+
+    def fake_check(port: int) -> bool:
+        return port == 8002
+
+    with patch.object(desktop_launcher, "_port_in_use", side_effect=fake_in_use), patch.object(
+        desktop_launcher, "_check_existing_instance", side_effect=fake_check
+    ):
+        assert desktop_launcher._find_existing_instance(8000) == 8002
+        assert desktop_launcher._find_existing_instance(8010) is None

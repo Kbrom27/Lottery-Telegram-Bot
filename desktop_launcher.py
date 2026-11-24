@@ -60,6 +60,16 @@ def _create_tray_image() -> Image.Image:
     return img
 
 
+def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    for bind_host in (host, "0.0.0.0"):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((bind_host, port))
+            except OSError:
+                return True
+    return False
+
+
 def _check_existing_instance(port: int) -> bool:
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=1.0) as resp:
@@ -69,14 +79,17 @@ def _check_existing_instance(port: int) -> bool:
         return False
 
 
+def _find_existing_instance(preferred: int, host: str = "127.0.0.1") -> int | None:
+    for port in range(preferred, preferred + 20):
+        if _port_in_use(port, host) and _check_existing_instance(port):
+            return port
+    return None
+
+
 def _pick_free_port(preferred: int, host: str = "127.0.0.1") -> int:
     for port in range(preferred, preferred + 20):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind((host, port))
-                return port
-            except OSError:
-                continue
+        if not _port_in_use(port, host):
+            return port
     return preferred
 
 
@@ -88,9 +101,10 @@ def main() -> None:
     settings = load_desktop_settings(data_dir)
     preferred_port = int(os.environ.get("WEB_PORT", settings.web_port or 8000))
 
-    # If already running, simply open the dashboard in browser and exit
-    if _check_existing_instance(preferred_port):
-        webbrowser.open(f"http://127.0.0.1:{preferred_port}")
+    # If already running on any candidate port, open the dashboard in browser and exit
+    existing_port = _find_existing_instance(preferred_port)
+    if existing_port is not None:
+        webbrowser.open(f"http://127.0.0.1:{existing_port}")
         return
 
     bind_host = os.environ.get("WEB_HOST", settings.web_host or "127.0.0.1")
