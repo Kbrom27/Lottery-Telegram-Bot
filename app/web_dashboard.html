@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LotteryBot Control Center</title>
+<title>Abel Online Lottery — LotteryBot Control Center</title>
 <style>
   :root {
     --bg: #f4f6fb;
@@ -187,7 +187,7 @@
   <div class="brand">
     <div class="brand-icon">🎟</div>
     <div>
-      <h1 id="hdrTitle">Telegram Lottery Control Center</h1>
+      <h1 id="hdrTitle">Abel Online Lottery</h1>
       <small id="hdrSub">Loading status...</small>
     </div>
   </div>
@@ -382,7 +382,7 @@
         <div class="grid-2">
           <div class="form-group">
             <label>Campaign / Bot Display Name</label>
-            <input id="cfg_campaign_name" type="text" placeholder="e.g. Ethio Grand Lottery 2026" required>
+            <input id="cfg_campaign_name" type="text" placeholder="e.g. Abel Online Lottery" required>
             <div class="hint">Shown on your web dashboard and Excel reports.</div>
           </div>
           <div class="form-group">
@@ -568,7 +568,7 @@ function esc(s) {
 
 function renderStatus(st) {
   currentStatus = st;
-  document.getElementById('hdrTitle').textContent = st.campaign_name || 'Telegram Lottery Control Center';
+  document.getElementById('hdrTitle').textContent = st.campaign_name || 'Abel Online Lottery';
   const subParts = [st.db_type];
   if (st.bot_username) subParts.push('@' + st.bot_username);
   subParts.push(st.qr_available ? 'QR Scanner: Ready' : 'QR Scanner: Off');
@@ -879,7 +879,7 @@ async function verifyToken() {
   const d = await res.json();
   if (d.ok) {
     out.innerHTML = `<span style="color:var(--green)">✅ Verified: <strong>${esc(d.first_name)}</strong> (@${esc(d.username)})</span>`;
-    if (!document.getElementById('cfg_campaign_name').value || document.getElementById('cfg_campaign_name').value === 'Telegram Lottery') {
+    if (!document.getElementById('cfg_campaign_name').value) {
       document.getElementById('cfg_campaign_name').value = d.first_name;
     }
   } else {

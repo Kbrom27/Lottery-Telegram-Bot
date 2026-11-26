@@ -134,6 +134,7 @@ def build_dispatcher(sm: async_sessionmaker, settings: Settings) -> Dispatcher:
         bounded = settings.campaign_start.year > 2000 or settings.campaign_end.year < 2100
         await msg.answer(
             M.START.format(
+                campaign_name=settings.campaign_name,
                 price=f"{settings.ticket_price.normalize():f}",  # "100", not "1E+2"
                 max_tickets=settings.max_tickets_per_payment,
                 campaign=M.CAMPAIGN_LINE.format(start=fmt(settings.campaign_start), end=fmt(settings.campaign_end))

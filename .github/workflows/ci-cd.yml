@@ -8,6 +8,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   test:
     name: Run Automated Tests (Ubuntu)
@@ -68,7 +71,7 @@ jobs:
           $env:LOTTERY_DATA_DIR = $dataDir
           $env:WEB_PORT = "8025"
 
-          $proc = Start-Process -FilePath "dist\LotteryBot.exe" -PassThru
+          $proc = Start-Process -FilePath "dist\LotteryBot\LotteryBot.exe" -PassThru
           try {
             $ready = $false
             for ($i = 0; $i -lt 40; $i++) {
@@ -112,36 +115,54 @@ jobs:
             }
           }
 
-      - name: Prepare distributable artifacts
+      - name: Install Inno Setup
         shell: pwsh
-        run: Copy-Item "CLIENT_SETUP_GUIDE.txt" "dist\CLIENT_SETUP_GUIDE.txt"
+        run: |
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\iscc.exe")) {
+            choco install innosetup --no-progress
+          }
 
-      - name: Upload Windows LotteryBot.exe artifact
+      - name: Build Windows Setup Installer with Inno Setup
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" scripts\installer.iss
+          if (-not (Test-Path "installer_output\LotteryBot-Setup.exe")) {
+            Write-Error "Installer executable LotteryBot-Setup.exe was not generated!"
+            exit 1
+          }
+
+      - name: Upload Windows Setup Installer (.exe)
         uses: actions/upload-artifact@v4
         with:
-          name: LotteryBot-Windows
+          name: LotteryBot-Setup
           path: |
-            dist/LotteryBot.exe
-            dist/CLIENT_SETUP_GUIDE.txt
+            installer_output/LotteryBot-Setup.exe
+            CLIENT_SETUP_GUIDE.txt
+          retention-days: 30
 
   release:
     name: Create GitHub Release
     needs: build-windows
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     runs-on: ubuntu-latest
     steps:
-      - name: Download built Windows artifact
+      - name: Download built Windows Setup Installer
         uses: actions/download-artifact@v4
         with:
-          name: LotteryBot-Windows
+          name: LotteryBot-Setup
           path: release-files
+
+      - name: Verify release assets
+        run: ls -lh release-files/
 
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            release-files/LotteryBot.exe
-            release-files/CLIENT_SETUP_GUIDE.txt
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'LotteryBot Latest Release' }}
+          draft: false
+          prerelease: false
+          files: release-files/*
           generate_release_notes: true

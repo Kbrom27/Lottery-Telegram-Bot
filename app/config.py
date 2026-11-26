@@ -68,7 +68,7 @@ def build_payment_instructions(
 
 @dataclass(frozen=True)
 class Settings:
-    campaign_name: str = "Telegram Lottery"
+    campaign_name: str = "Abel Online Lottery"
     bot_token: str = ""
     database_url: str = "postgresql+asyncpg://lottery:lottery@localhost:5432/lottery"
     admin_ids: frozenset[int] = frozenset()
@@ -244,7 +244,7 @@ def load_desktop_settings(data_dir: Path | None = None) -> Settings:
         instructions = build_payment_instructions(price, cbe_acc, cbe_name, tb_num, tb_name)
 
     return Settings(
-        campaign_name=str(raw.get("campaign_name") or "Telegram Lottery"),
+        campaign_name=str(raw.get("campaign_name") or "Abel Online Lottery"),
         bot_token=str(raw.get("bot_token", "")).strip(),
         database_url=str(raw.get("database_url") or default_db),
         admin_ids=parse_admin_ids(raw.get("admin_ids", "")),

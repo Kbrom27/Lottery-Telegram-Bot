@@ -1,7 +1,7 @@
 """User-facing text. All in one place so it is easy to translate (Amharic / Tigrinya)."""
 
 START = (
-    "🎟 Welcome!\n\n"
+    "🎟 Welcome to {campaign_name}!\n\n"
     "• Ticket price: {price} ETB per ticket\n"
     "• You can buy multiple tickets in one payment: send 200 ETB for 2 tickets, 300 ETB for 3 tickets, 400 ETB for 4 tickets, etc. (up to {max_tickets} tickets per transfer)\n"
     "{campaign}\n"
@@ -19,7 +19,7 @@ SEND_SCREENSHOT = "Please send a screenshot (photo) of your payment receipt. /st
 NO_TICKETS = "You don't have any tickets yet. Send a payment screenshot to get one."
 MY_TICKETS = "🎟 Your tickets ({n}):\n{numbers}"
 
-APPROVED = "✅ Payment verified!\nYour ticket number(s): {numbers}\nGood luck! 🍀"
+APPROVED = "✅ Payment verified!\nYour ticket number(s): {numbers}\nGood luck! ሰናይ ዕድል 🍀"
 UNDER_REVIEW = (
     "🕒 We couldn't verify your payment automatically, so a person is checking it. "
     "You will get a message here as soon as it's done."

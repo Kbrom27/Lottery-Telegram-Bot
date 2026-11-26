@@ -196,6 +196,7 @@ def find_tesseract_cmd(configured: str = "") -> str | None:
         r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Tesseract-OCR", "tesseract.exe"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tesseract", "tesseract.exe"),
+        os.path.join(os.path.dirname(os.path.abspath(__import__("sys").executable)), "tesseract", "tesseract.exe"),
     ]
     for c in candidates:
         if c and os.path.exists(c):

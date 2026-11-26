@@ -89,6 +89,7 @@ def tg(db):
 async def test_start_shows_price_and_instructions(tg):
     await tg.send(ALICE, "/start")
     out = tg.session.texts(ALICE)[0]
+    assert "Abel Online Lottery" in out
     assert "Ticket price: 100 ETB" in out
 
 
@@ -154,6 +155,7 @@ async def test_admin_review_flow_approve(tg):
         assert (await s.get(Payment, pid)).status == "approved"
         assert (await s.execute(select(Ticket.number).order_by(Ticket.number))).scalars().all() == [1, 2]
     assert tg.session.texts(ALICE) == [M.APPROVED.format(numbers="#00001, #00002")]
+    assert "ሰናይ ዕድል" in tg.session.texts(ALICE)[0]
 
     # Second tap on the same (now stale) button must not issue anything new.
     await tg.send(ADMIN, callback=buttons[0])

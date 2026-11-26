@@ -419,15 +419,20 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
         if sys.platform != "win32":
             return JSONResponse({"ok": False, "error": "Desktop shortcut creation is only supported on Windows."}, status_code=400)
         try:
-            target = sys.executable.replace("'", "''")
-            workdir = str(Path(sys.executable).resolve().parent).replace("'", "''")
+            exe_path = Path(sys.executable).resolve()
+            app_dir = exe_path.parent
+            bat_path = app_dir / "start-lotterybot.bat"
+            target_path = str(bat_path if bat_path.exists() else exe_path).replace("'", "''")
+            icon_path = str(exe_path).replace("'", "''")
+            workdir = str(app_dir).replace("'", "''")
             ps = (
                 "$desktop = [Environment]::GetFolderPath('Desktop');"
                 "if (-not $desktop) { $desktop = Join-Path $env:USERPROFILE 'Desktop' };"
                 "$lnk = Join-Path $desktop 'LotteryBot.lnk';"
                 "$s = (New-Object -COM WScript.Shell).CreateShortcut($lnk);"
-                f"$s.TargetPath = '{target}';"
+                f"$s.TargetPath = '{target_path}';"
                 f"$s.WorkingDirectory = '{workdir}';"
+                f"$s.IconLocation = '{icon_path},0';"
                 "$s.Save();"
                 "Write-Output $lnk"
             )

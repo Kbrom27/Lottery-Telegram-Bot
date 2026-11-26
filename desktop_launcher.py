@@ -1,9 +1,11 @@
 """Desktop launcher for Windows (.exe) and Linux: runs the Web Dashboard, Bot Service, and System Tray."""
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
+import multiprocessing
 import os
 import socket
 import sys
@@ -93,21 +95,37 @@ def _pick_free_port(preferred: int, host: str = "127.0.0.1") -> int:
     return preferred
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="LotteryBot Desktop Launcher & Web Control Center")
+    parser.add_argument("--host", default=None, help="Host IP to bind (overrides settings/WEB_HOST)")
+    parser.add_argument("--port", type=int, default=None, help="Port to bind (overrides settings/WEB_PORT)")
+    parser.add_argument("--no-browser", action="store_true", help="Do not open browser automatically")
+    parser.add_argument("--no-tray", action="store_true", help="Run without system tray icon")
+    parser.add_argument("--data-dir", default=None, help="Custom persistent lottery_data directory")
+    args, _unknown = parser.parse_known_args(argv)
+    return args
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    if args.data_dir:
+        os.environ["LOTTERY_DATA_DIR"] = str(Path(args.data_dir).resolve())
+
     data_dir = resolve_data_dir()
     _setup_logging(data_dir)
     log = logging.getLogger("launcher")
 
     settings = load_desktop_settings(data_dir)
-    preferred_port = int(os.environ.get("WEB_PORT", settings.web_port or 8000))
+    preferred_port = int(args.port or os.environ.get("WEB_PORT") or settings.web_port or 8000)
 
     # If already running on any candidate port, open the dashboard in browser and exit
     existing_port = _find_existing_instance(preferred_port)
     if existing_port is not None:
-        webbrowser.open(f"http://127.0.0.1:{existing_port}")
+        if not args.no_browser and os.environ.get("LOTTERY_NO_BROWSER") != "1":
+            webbrowser.open(f"http://127.0.0.1:{existing_port}")
         return
 
-    bind_host = os.environ.get("WEB_HOST", settings.web_host or "127.0.0.1")
+    bind_host = str(args.host or os.environ.get("WEB_HOST") or settings.web_host or "127.0.0.1")
     port = _pick_free_port(preferred_port, bind_host)
     url = f"http://127.0.0.1:{port}"
 
@@ -128,7 +146,7 @@ def main() -> None:
         time.sleep(0.1)
 
     log.info("Web Control Center listening on %s (bind=%s:%s)", url, bind_host, port)
-    if os.environ.get("LOTTERY_NO_BROWSER") != "1":
+    if not args.no_browser and os.environ.get("LOTTERY_NO_BROWSER") != "1":
         webbrowser.open(url)
 
     def _run_coro(coro):
@@ -137,7 +155,7 @@ def main() -> None:
             asyncio.run_coroutine_threadsafe(coro, loop)
 
     # Run Windows System Tray icon if available, otherwise wait on server thread
-    if os.environ.get("LOTTERY_NO_TRAY") == "1":
+    if args.no_tray or os.environ.get("LOTTERY_NO_TRAY") == "1":
         server_thread.join()
         return
 
@@ -180,4 +198,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()

@@ -8,6 +8,7 @@ __pycache__/
 .vscode/
 build/
 dist/
+installer_output/
 *.pyc
 *.db
 *.log

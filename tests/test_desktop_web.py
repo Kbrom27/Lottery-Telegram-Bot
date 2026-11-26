@@ -41,8 +41,10 @@ async def test_initial_status_is_unconfigured_with_no_hardcoded_bank(web_env):
     st = (await client.get("/api/status")).json()
     assert st["status"] == "unconfigured"
     assert st["configured"] is False
+    assert st["campaign_name"] == "Abel Online Lottery"
     assert "SQLite" in st["db_type"]
     cfg = (await client.get("/api/settings")).json()
+    assert cfg["campaign_name"] == "Abel Online Lottery"
     assert cfg["bot_token"] == ""
     assert cfg["cbe_account"] == ""
 
@@ -381,3 +383,69 @@ def test_find_existing_instance_scans_port_range():
     ):
         assert desktop_launcher._find_existing_instance(8000) == 8002
         assert desktop_launcher._find_existing_instance(8010) is None
+
+
+def test_desktop_launcher_parse_args():
+    ns = desktop_launcher.parse_args(
+        ["--host", "0.0.0.0", "--port", "8090", "--no-browser", "--no-tray", "--data-dir", "./custom_data"]
+    )
+    assert ns.host == "0.0.0.0"
+    assert ns.port == 8090
+    assert ns.no_browser is True
+    assert ns.no_tray is True
+    assert ns.data_dir == "./custom_data"
+
+
+async def test_upgrade_preserves_existing_settings_and_issued_tickets(tmp_path):
+    """Simulate an app upgrade re-initializing over an existing lottery_data directory."""
+    data_dir = tmp_path / "lottery_data"
+    data_dir.mkdir()
+
+    # v1 manager: user configures campaign and issues ticket #00001
+    m1 = BotServiceManager(data_dir=data_dir, settings=load_desktop_settings(data_dir))
+    await m1.init_database()
+    app1 = create_web_app(m1)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app1), base_url="http://test") as c1:
+        await c1.post(
+            "/api/settings",
+            json={
+                "campaign_name": "Upgrade Persist Lottery",
+                "bot_token": "999999:UPGRADE_TOKEN_ABCDEFGHIJKLMN",
+                "admin_ids": "9262763122",
+                "ticket_price": "100",
+                "first_ticket_number": 1,
+                "cbe_account": "1000123456789",
+                "campaign_unbounded": True,
+            },
+        )
+    async with m1.sm() as s, s.begin():
+        u = User(telegram_id=9262763122, full_name="Abel Equb", username="abel")
+        s.add(u)
+        await s.flush()
+        p = Payment(user_id=u.id, tg_file_id="f_up", image_sha256="e" * 64, status="review")
+        s.add(p)
+        await s.flush()
+        pid = p.id
+    async with m1.sm() as s, s.begin():
+        nums = await approve(s, pid, 2, "test")
+    assert nums == [1, 2]
+    await m1.shutdown()
+
+    # v2 manager after upgrade: starts fresh using the exact same lottery_data directory
+    m2 = BotServiceManager(data_dir=data_dir, settings=load_desktop_settings(data_dir))
+    await m2.init_database()
+    try:
+        app2 = create_web_app(m2)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app2), base_url="http://test") as c2:
+            st = (await c2.get("/api/status")).json()
+            assert st["configured"] is True
+            assert st["campaign_name"] == "Upgrade Persist Lottery"
+            cfg = (await c2.get("/api/settings")).json()
+            assert cfg["admin_ids"] == "9262763122"
+            assert cfg["cbe_account"] == "1000123456789"
+            dash = (await c2.get("/api/dashboard")).json()
+            assert dash["total_tickets_issued"] == 2
+            assert dash["next_ticket_number"] == 3
+            assert dash["total_birr_received"] == 200.0
+    finally:
+        await m2.shutdown()

@@ -2,16 +2,25 @@
         LOTTERYBOT FOR WINDOWS — CLIENT QUICK GUIDE
 ============================================================
 
-1. HOW TO INSTALL & RUN
-   - Put "LotteryBot.exe" inside a dedicated folder on your
-     Windows PC (for example: C:\LotteryBot\LotteryBot.exe
-     or Desktop\LotteryBot\LotteryBot.exe).
-   - Double-click "LotteryBot.exe".
-   - Wait 2-3 seconds: your default web browser will open
-     automatically to the Web Control Center (http://127.0.0.1:8000).
+1. HOW TO INSTALL & UPGRADE
+   - Download and double-click "LotteryBot-Setup.exe".
+   - Follow the Windows Setup Wizard (choose install location
+     and optionally check "Create a desktop icon").
+   - After installation, shortcuts are created in your Start Menu
+     and (if selected) on your Desktop:
+       * Start LotteryBot  — Starts the service & opens Web UI
+       * Stop LotteryBot   — Cleanly stops the background service
+       * Open in Browser   — Opens http://127.0.0.1:8000
+       * Uninstall         — Standard Windows uninstaller
    - A small ticket icon also appears in your Windows System
      Tray (bottom-right near the clock). Right-click it anytime
      to open the dashboard, start/stop the bot, or exit.
+   - UPGRADING TO A NEWER VERSION:
+     Simply run the newer "LotteryBot-Setup.exe" into the same
+     install folder. Only the program files are upgraded — all
+     your existing settings (config.json), issued tickets and
+     payments (lottery.db), and screenshots in "lottery_data"
+     remain completely untouched!
 
 2. FIRST-TIME SETUP (IN YOUR WEB BROWSER)
    On first launch, fill out the Setup & Settings page:
@@ -40,10 +49,13 @@
      or reject manually if needed.
    - Draw Winners Tab: Provably fair SHA-256 winner selection.
 
-4. WHERE YOUR DATA IS SAVED
-   - A "lottery_data" folder is created automatically next to
-     LotteryBot.exe (containing config.json, lottery.db, and
-     saved receipt screenshots). Back up this folder periodically!
+4. WHERE YOUR DATA IS SAVED (PRESERVED ON UPGRADE)
+   - All user data is stored separately inside the "lottery_data"
+     folder inside your install directory (containing config.json,
+     lottery.db, logs, and saved receipt screenshots).
+   - Upgrading by running a new "LotteryBot-Setup.exe" never
+     deletes or resets "lottery_data". Back up this folder
+     periodically!
 
 5. OPTIONAL ADD-ONS
    - Cropped / Telebirr Screenshots (Text OCR):
