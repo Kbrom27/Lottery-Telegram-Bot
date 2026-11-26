@@ -179,6 +179,14 @@
     padding: 12px 18px; border-radius: 10px; font-size: 14px; font-weight: 500;
     box-shadow: 0 10px 25px rgba(0,0,0,.25); z-index: 200; display: none;
   }
+  .auth-overlay {
+    position: fixed; inset: 0; background: rgba(15,23,42,.72); backdrop-filter: blur(4px);
+    display: none; align-items: center; justify-content: center; z-index: 300; padding: 16px;
+  }
+  .auth-box {
+    background: #fff; border-radius: 14px; padding: 26px; width: 100%; max-width: 390px;
+    box-shadow: 0 20px 50px rgba(0,0,0,.3); border: 1px solid var(--border);
+  }
 </style>
 </head>
 <body>
@@ -196,6 +204,7 @@
     <button id="btnStart" class="btn-start" onclick="serviceAction('start')">▶ Start Service</button>
     <button id="btnStop" class="btn-stop" onclick="serviceAction('stop')" style="display:none">⏹ Stop Service</button>
     <button id="btnRestart" class="btn-dark" onclick="serviceAction('restart')" style="display:none">↻ Restart</button>
+    <button id="btnLogout" class="btn-secondary btn-sm" onclick="doLogout()" style="display:none">🔒 Lock UI</button>
   </div>
 </header>
 
@@ -244,6 +253,7 @@
           <a class="btn btn-primary" href="/api/export/report" download>📈 Download Financial Summary Report (.xlsx)</a>
           <a class="btn btn-secondary" href="/api/export/csv" download>📄 Draw CSV (Full)</a>
           <a class="btn btn-secondary" href="/api/export/csv?public=1" download>📄 Public List CSV</a>
+          <a class="btn btn-secondary" href="/api/backup" download>💾 Download Data Backup (.zip)</a>
         </div>
       </div>
       <div class="hint">
@@ -501,9 +511,13 @@
         </div>
         <div class="grid-2">
           <div class="form-group">
-            <label class="check-row"><input id="cfg_auto_start" type="checkbox"> Automatically start bot service whenever app opens</label>
+            <label>Web Dashboard Admin Password (Recommended for LAN / Server)</label>
+            <input id="cfg_web_password" type="password" autocomplete="new-password" placeholder="Leave blank to keep unchanged">
+            <div class="hint" id="webPwHint">Optional locally; strongly recommended before enabling LAN access or exposing port 8000.</div>
           </div>
-          <div class="form-group">
+          <div class="form-group" style="display:flex; flex-direction:column; justify-content:center; gap:8px;">
+            <label class="check-row"><input id="cfg_clear_password" type="checkbox"> Remove dashboard password lock</label>
+            <label class="check-row"><input id="cfg_auto_start" type="checkbox"> Automatically start bot service whenever app opens</label>
             <label class="check-row"><input id="cfg_lan" type="checkbox"> Allow LAN access (bind 0.0.0.0 for phone SMS forwarder, takes effect on app restart)</label>
           </div>
         </div>
@@ -531,10 +545,63 @@
 
 <div id="toast" class="toast"></div>
 
+<div id="authOverlay" class="auth-overlay">
+  <form class="auth-box" onsubmit="doLogin(event)">
+    <h2 style="margin:0 0 6px; font-size:18px;">🔒 Admin Sign In</h2>
+    <p class="hint" style="margin:0 0 16px;">Enter the Web Dashboard Admin Password to continue.</p>
+    <div class="form-group">
+      <input id="loginPassword" type="password" placeholder="Admin Password" autocomplete="current-password" required>
+    </div>
+    <div id="loginError" class="hint" style="color:var(--red); margin-bottom:10px;"></div>
+    <button type="submit" class="btn-primary" style="width:100%; justify-content:center;">Unlock Dashboard</button>
+  </form>
+</div>
+
 <script>
 let viewMode = 'holders';
 let currentStatus = {};
 let firstLoadDone = false;
+let isLocked = false;
+
+const _origFetch = window.fetch.bind(window);
+window.fetch = async (url, opts) => {
+  const res = await _origFetch(url, opts);
+  if (res.status === 401 && typeof url === 'string' && url.startsWith('/api/') && !url.startsWith('/api/auth/')) {
+    showAuthOverlay();
+  }
+  return res;
+};
+
+function showAuthOverlay(msg='') {
+  isLocked = true;
+  document.getElementById('loginError').textContent = msg;
+  document.getElementById('authOverlay').style.display = 'flex';
+  setTimeout(() => document.getElementById('loginPassword').focus(), 50);
+}
+
+async function doLogin(ev) {
+  ev.preventDefault();
+  const pw = document.getElementById('loginPassword').value;
+  const res = await _origFetch('/api/auth/login', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ password: pw })
+  });
+  const d = await res.json();
+  if (!res.ok || !d.ok) {
+    document.getElementById('loginError').textContent = d.error || 'Invalid password';
+    return;
+  }
+  isLocked = false;
+  document.getElementById('loginPassword').value = '';
+  document.getElementById('loginError').textContent = '';
+  document.getElementById('authOverlay').style.display = 'none';
+  await loadSettings();
+  await refreshDashboard();
+}
+
+async function doLogout() {
+  await _origFetch('/api/auth/logout', { method: 'POST' });
+  showAuthOverlay('Session locked. Sign in again to continue.');
+}
 
 function toast(msg, isErr=false) {
   const el = document.getElementById('toast');
@@ -589,12 +656,15 @@ function renderStatus(st) {
   document.getElementById('btnStart').style.display = (st.status === 'running' || st.status === 'starting') ? 'none' : 'inline-flex';
   document.getElementById('btnStop').style.display = (st.status === 'running' || st.status === 'starting') ? 'inline-flex' : 'none';
   document.getElementById('btnRestart').style.display = (st.status === 'running') ? 'inline-flex' : 'none';
+  document.getElementById('btnLogout').style.display = st.web_password_set ? 'inline-flex' : 'none';
 
   const banner = document.getElementById('bannerArea');
   if (!st.configured) {
     banner.innerHTML = `<div class="alert alert-warn"><span>⚠️ <strong>First-Time Setup Needed:</strong> Please fill in your Bot Token, Admin ID, Ticket Price, and Bank Details below, then click <strong>Save &amp; Start Bot Service</strong>.</span><button class="btn-primary btn-sm" onclick="showTab('settings')">Go to Setup</button></div>`;
   } else if (st.status === 'error' && st.error) {
     banner.innerHTML = `<div class="alert alert-err"><span>❌ <strong>Service Error:</strong> ${esc(st.error)}</span></div>`;
+  } else if (st.web_host === '0.0.0.0' && !st.web_password_set) {
+    banner.innerHTML = `<div class="alert alert-warn"><span>🔓 <strong>Security Notice:</strong> LAN/Server access (<code>0.0.0.0</code>) is active without a Web Dashboard Admin Password. Set one in Settings before exposing over a shared network.</span><button class="btn-primary btn-sm" onclick="showTab('settings')">Set Password</button></div>`;
   } else if (st.status === 'stopped') {
     banner.innerHTML = `<div class="alert alert-warn"><span>⏸ The bot service is currently stopped. Click <strong>▶ Start Service</strong> in the top bar when ready to accept tickets.</span></div>`;
   } else {
@@ -855,6 +925,11 @@ async function loadSettings() {
   document.getElementById('cfg_claude_model').value = s.claude_model || 'claude-sonnet-5-5';
   document.getElementById('cfg_auto_start').checked = !!s.auto_start_bot;
   document.getElementById('cfg_lan').checked = (s.web_host === '0.0.0.0');
+  document.getElementById('cfg_web_password').value = '';
+  document.getElementById('cfg_clear_password').checked = false;
+  document.getElementById('webPwHint').textContent = s.web_password_set
+    ? '🔒 Password protection is ACTIVE. Enter a new password to change it, or leave blank to keep existing.'
+    : 'Optional locally; strongly recommended before enabling LAN access or exposing port 8000.';
   if (s.is_windows) document.getElementById('btnShortcut').style.display = 'inline-flex';
   toggleDates();
   toggleClaude();
@@ -913,6 +988,8 @@ async function saveSettings(ev, startAfter) {
     claude_model: document.getElementById('cfg_claude_model').value,
     auto_start_bot: document.getElementById('cfg_auto_start').checked,
     web_host: document.getElementById('cfg_lan').checked ? '0.0.0.0' : '127.0.0.1',
+    web_password: document.getElementById('cfg_web_password').value,
+    clear_web_password: document.getElementById('cfg_clear_password').checked,
     start_after_save: startAfter,
   };
   const res = await fetch('/api/settings', {
@@ -920,6 +997,8 @@ async function saveSettings(ev, startAfter) {
   });
   const d = await res.json();
   if (!d.ok) return toast(d.error || 'Could not save settings', true);
+  document.getElementById('cfg_web_password').value = '';
+  document.getElementById('cfg_clear_password').checked = false;
   renderStatus(d.status);
   if (d.status.status === 'error') {
     toast(d.status.error || 'Settings saved, but bot failed to start', true);
@@ -945,8 +1024,19 @@ async function loadLogs() {
   box.scrollTop = box.scrollHeight;
 }
 
-loadSettings().then(() => refreshDashboard());
+(async function initApp() {
+  const res = await _origFetch('/api/auth/status');
+  const a = await res.json();
+  if (a.password_required && !a.authenticated) {
+    showAuthOverlay();
+    return;
+  }
+  await loadSettings();
+  await refreshDashboard();
+})();
+
 setInterval(() => {
+  if (isLocked) return;
   refreshDashboard();
   if (document.getElementById('tab-logs').classList.contains('active')) loadLogs();
 }, 4000);

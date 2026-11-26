@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import io
+import json
+import sqlite3
+import zipfile
 from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import patch
@@ -274,7 +277,7 @@ async def test_cbe_qr_verified_credit_preserves_received_at_for_campaign_window(
     with patch("app.extract.fetch_cbe_transaction_detail", return_value=mock_tx):
         ex = _try_cbe_url("https://mbreciept.cbe.com.et/tok123", source="QR")
     assert ex is not None
-    assert ex.verified_bank_credit["received_at"] == "2025-01-01T10:00:00Z"
+    assert ex.verified_bank_credit["received_at"] == "2025-01-01T10:00:00+00:00"
 
     data_dir = tmp_path / "window_data"
     data_dir.mkdir()
@@ -449,3 +452,66 @@ async def test_upgrade_preserves_existing_settings_and_issued_tickets(tmp_path):
             assert dash["total_birr_received"] == 200.0
     finally:
         await m2.shutdown()
+
+
+async def test_web_admin_password_protection_security_headers_and_backup(web_env, tmp_path):
+    client, manager = web_env
+
+    # Configure settings + enable dashboard password lock
+    save_res = await client.post(
+        "/api/settings",
+        json={
+            "campaign_name": "Abel Online Lottery",
+            "bot_token": "999999:PROD_TOKEN_ABCDEFGHIJKLMNO",
+            "admin_ids": "9262763122",
+            "ticket_price": "100",
+            "web_password": "StrongAdminPassword!2026",
+            "campaign_unbounded": True,
+        },
+    )
+    assert save_res.status_code == 200
+    assert save_res.headers["x-content-type-options"] == "nosniff"
+    assert save_res.headers["x-frame-options"] == "DENY"
+    assert save_res.headers["cache-control"] == "no-store"
+
+    # config.json must store PBKDF2 hash, never plaintext password
+    cfg_raw = json.loads((manager.data_dir / "config.json").read_text(encoding="utf-8"))
+    assert "web_password" not in cfg_raw
+    assert cfg_raw["web_password_hash"].startswith("pbkdf2_sha256$")
+
+    # Logout and verify /api/* is blocked while /healthz and / remain reachable
+    await client.post("/api/auth/logout")
+    assert (await client.get("/healthz")).status_code == 200
+    assert (await client.get("/")).status_code == 200
+    auth_st = (await client.get("/api/auth/status")).json()
+    assert auth_st == {"password_required": True, "authenticated": False}
+    assert (await client.get("/api/settings")).status_code == 401
+    assert (await client.get("/api/dashboard")).status_code == 401
+    assert (await client.get("/api/backup")).status_code == 401
+
+    # Wrong password returns 401
+    bad_login = await client.post("/api/auth/login", json={"password": "wrong"})
+    assert bad_login.status_code == 401
+
+    # Header authentication works and backup produces a valid SQLite + config zip snapshot
+    ok_login = await client.post("/api/auth/login", json={"password": "StrongAdminPassword!2026"})
+    assert ok_login.status_code == 200
+    assert (await client.get("/api/settings")).json()["web_password_set"] is True
+
+    bk = await client.get("/api/backup")
+    assert bk.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(bk.content)) as zf:
+        names = set(zf.namelist())
+        assert {"lottery.db", "config.json"} <= names
+        snap_path = tmp_path / "restored.db"
+        snap_path.write_bytes(zf.read("lottery.db"))
+        conn = sqlite3.connect(snap_path)
+        cnt = conn.execute("SELECT next_number FROM counters WHERE id = 1").fetchone()[0]
+        conn.close()
+        assert cnt == 1
+
+    # Invalid JSON or invalid numeric parameters fail cleanly with 400 (not 500)
+    bad_json = await client.post("/api/reviews/1/approve", content="not-json", headers={"Content-Type": "application/json"})
+    assert bad_json.status_code == 400
+    bad_num = await client.post("/api/reviews/1/approve", json={"tickets": "abc"})
+    assert bad_num.status_code == 400

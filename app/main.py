@@ -135,7 +135,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             and hmac.compare_digest(x_telegram_bot_api_secret_token.encode(), manager.settings.webhook_secret.encode())
         ):
             raise HTTPException(status_code=401)
-        update = Update.model_validate(await request.json(), context={"bot": app.state.bot})
+        if not getattr(app.state, "bot", None) or not getattr(app.state, "dp", None):
+            raise HTTPException(status_code=503, detail="Bot webhook handler not active")
+        try:
+            payload = await request.json()
+        except Exception as e:
+            raise HTTPException(status_code=400, detail="Invalid JSON") from e
+        update = Update.model_validate(payload, context={"bot": app.state.bot})
         await app.state.dp.feed_update(app.state.bot, update)
         return {"ok": True}
 

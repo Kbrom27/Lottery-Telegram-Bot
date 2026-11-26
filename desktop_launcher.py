@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import multiprocessing
 import os
 import socket
@@ -35,7 +36,7 @@ def _setup_logging(data_dir: Path) -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
+            RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"),
             logging.StreamHandler(sys.stderr),
         ],
     )

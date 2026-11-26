@@ -1,6 +1,8 @@
 """Settings management: supports environment variables (.env / Docker) and JSON config (Desktop/Web UI)."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -66,6 +68,27 @@ def build_payment_instructions(
     return "\n".join(lines)
 
 
+def hash_web_password(password: str) -> str:
+    """Hash a Web Dashboard admin password using salted PBKDF2-HMAC-SHA256."""
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("ascii"), 200_000).hex()
+    return f"pbkdf2_sha256${salt}${digest}"
+
+
+def verify_web_password(password: str, stored: str) -> bool:
+    """Verify a plaintext password against a stored PBKDF2 hash or env plaintext secret."""
+    if not stored or not password:
+        return False
+    if stored.startswith("pbkdf2_sha256$"):
+        parts = stored.split("$", 2)
+        if len(parts) != 3:
+            return False
+        _, salt, expected = parts
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("ascii"), 200_000).hex()
+        return hmac.compare_digest(digest, expected)
+    return hmac.compare_digest(password.encode("utf-8"), stored.encode("utf-8"))
+
+
 @dataclass(frozen=True)
 class Settings:
     campaign_name: str = "Abel Online Lottery"
@@ -111,6 +134,7 @@ class Settings:
     web_host: str = "127.0.0.1"
     web_port: int = 8000
     auto_start_bot: bool = False
+    web_password: str = ""  # Optional PBKDF2 hash or WEB_ADMIN_PASSWORD env var
 
     def fmt(self, number: int) -> str:
         return f"#{number:0{self.ticket_width}d}"
@@ -150,6 +174,8 @@ class Settings:
             "web_host": self.web_host,
             "web_port": self.web_port,
             "auto_start_bot": self.auto_start_bot,
+            "web_password_set": bool(self.web_password),
+            "lan_exposed": self.web_host == "0.0.0.0",
             "is_configured": self.is_configured,
         }
 
@@ -198,6 +224,7 @@ class Settings:
             web_host=get("WEB_HOST", d.web_host),
             web_port=int(get("WEB_PORT", str(d.web_port))),
             auto_start_bot=get("AUTO_START_BOT", "").lower() in ("1", "true", "yes"),
+            web_password=get("WEB_ADMIN_PASSWORD", ""),
         )
 
 
@@ -273,6 +300,7 @@ def load_desktop_settings(data_dir: Path | None = None) -> Settings:
         web_host=str(raw.get("web_host") or "127.0.0.1"),
         web_port=int(raw.get("web_port") or 8000),
         auto_start_bot=bool(raw.get("auto_start_bot", False)),
+        web_password=str(os.environ.get("WEB_ADMIN_PASSWORD") or raw.get("web_password_hash") or ""),
     )
 
 
@@ -287,6 +315,13 @@ def save_desktop_settings(payload: dict[str, Any], data_dir: Path | None = None)
         existing = json.loads(cfg_path.read_text(encoding="utf-8"))
 
     merged = {**existing, **payload}
+    clear_pw = bool(merged.pop("clear_web_password", False))
+    raw_pw = str(merged.pop("web_password", "") or "").strip()
+    if clear_pw:
+        merged.pop("web_password_hash", None)
+    elif raw_pw:
+        merged["web_password_hash"] = hash_web_password(raw_pw)
+
     # Normalize and validate before saving
     price = Decimal(str(merged.get("ticket_price", "100")))
     if price <= 0:

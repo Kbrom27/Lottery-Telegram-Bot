@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from PIL import Image, ImageOps
@@ -204,6 +205,18 @@ def find_tesseract_cmd(configured: str = "") -> str | None:
     return None
 
 
+def parse_cbe_datetime(data: dict) -> datetime | None:
+    """Parse dateTimes[0] from CBE transaction JSON as timezone-aware UTC datetime."""
+    dts = data.get("dateTimes")
+    if not (isinstance(dts, list) and dts and isinstance(dts[0], str) and dts[0].strip()):
+        return None
+    try:
+        parsed = datetime.fromisoformat(dts[0].strip().replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
 def _try_cbe_url(text: str, raw_text: str | None = None, source: str = "QR") -> Extracted | None:
     cbe_m = _CBE_URL_RE.search(text)
     if not cbe_m:
@@ -217,8 +230,8 @@ def _try_cbe_url(text: str, raw_text: str | None = None, source: str = "QR") -> 
     amt = Decimal(str(amt_str))
     sender = data.get("debitAccountHolder") or data.get("creditAccountHolder")
     receiver = data.get("creditAccountNo")
-    dts = data.get("dateTimes")
-    received_at = dts[0].strip() if isinstance(dts, list) and dts and isinstance(dts[0], str) and dts[0].strip() else None
+    dt_parsed = parse_cbe_datetime(data)
+    received_at = dt_parsed.isoformat() if dt_parsed else None
     return Extracted(
         transaction_id=ref,
         amount=amt,

@@ -6,10 +6,8 @@ SIM and point it at POST /sms (see README). You can also import a bank statement
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
-import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -17,7 +15,15 @@ from decimal import Decimal
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .extract import canon_ref, find_amount, find_sender, find_transaction_id
+from .extract import (
+    canon_ref,
+    fetch_cbe_transaction_detail,
+    find_amount,
+    find_sender,
+    find_transaction_id,
+    normalize_ref,
+    parse_cbe_datetime,
+)
 from .models import BankCredit, utcnow
 
 log = logging.getLogger("sms")
@@ -27,25 +33,15 @@ _CREDIT_WORDS = re.compile(r"\b(received|credited|deposit(?:ed)?)\b", re.I)
 _CBE_URL_RE = re.compile(r"https?://(?:www\.)?mbreciept\.cbe\.com\.et/([A-Za-z0-9_-]+)", re.I)
 
 
-def resolve_cbe_receipt(token: str) -> tuple[str, Decimal, str | None] | None:
-    try:
-        req = urllib.request.Request(
-            f"https://Mb.cbe.com.et/api/v1/transactions/public/transaction-detail/{token}",
-            headers={
-                "X-App-ID": "d1292e42-7400-49de-a2d3-9731caa4c819",
-                "X-App-Version": "0a01980b-9859-1369-8198-59f403820000",
-                "User-Agent": "Mozilla/5.0",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
-            ref = data.get("id")
-            amt_str = data.get("amountCredited") or data.get("amountDebited")
-            sender = data.get("debitAccountHolder") or data.get("creditAccountHolder")
-            if ref and amt_str:
-                return ref, Decimal(str(amt_str)), sender
-    except Exception as e:
-        log.warning("CBE receipt resolution failed for %s: %s", token, e)
+def resolve_cbe_receipt(token: str) -> tuple[str, Decimal, str | None, datetime | None] | None:
+    data = fetch_cbe_transaction_detail(token)
+    if not data or data.get("status") != "COMPLETED":
+        return None
+    ref = data.get("id")
+    amt_str = data.get("amountCredited") or data.get("amountDebited")
+    sender = data.get("debitAccountHolder") or data.get("creditAccountHolder")
+    if ref and amt_str:
+        return normalize_ref(str(ref)), Decimal(str(amt_str)), sender, parse_cbe_datetime(data)
     return None
 
 
@@ -54,6 +50,7 @@ class ParsedCredit:
     reference: str
     amount: Decimal
     sender: str | None
+    received_at: datetime | None = None
 
 
 def parse_credit_sms(text: str) -> ParsedCredit | None:
@@ -65,8 +62,8 @@ def parse_credit_sms(text: str) -> ParsedCredit | None:
     if cbe_m:
         resolved = resolve_cbe_receipt(cbe_m.group(1))
         if resolved:
-            ref, amt, sender = resolved
-            return ParsedCredit(reference=ref, amount=amt, sender=sender)
+            ref, amt, sender, rec_at = resolved
+            return ParsedCredit(reference=ref, amount=amt, sender=sender, received_at=rec_at)
 
     ref = find_transaction_id(text)
     amount = find_amount(text)
@@ -108,5 +105,5 @@ async def ingest_sms(
     parsed = parse_credit_sms(text)
     if parsed is None:
         return "ignored", None
-    credit = await add_credit(session, parsed.reference, parsed.amount, parsed.sender, received_at, text)
+    credit = await add_credit(session, parsed.reference, parsed.amount, parsed.sender, parsed.received_at or received_at, text)
     return ("created", credit) if credit else ("duplicate", None)

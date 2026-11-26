@@ -2,15 +2,21 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import hmac
 import io
 import json
 import logging
 import os
 import secrets
+import sqlite3
 import subprocess
 import sys
+import tempfile
+import time
+import zipfile
 from contextlib import asynccontextmanager
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -23,7 +29,8 @@ import draw as draw_lib
 
 from . import messages as M
 from .bot import safe_send
-from .config import EAT, build_payment_instructions
+from .config import EAT, build_payment_instructions, verify_web_password
+from .db import is_sqlite_url
 from .extract import normalize_ref
 from .models import BankCredit, Payment, Ticket, User
 from .reports import (
@@ -41,6 +48,11 @@ from .verify import find_credit
 log = logging.getLogger("web_ui")
 
 
+_COOKIE_NAME = "lottery_admin_session"
+_SESSION_TTL = 86400  # 24 hours
+_PUBLIC_API_PATHS = {"/api/auth/status", "/api/auth/login", "/api/auth/logout"}
+
+
 def _template_path() -> Path:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         p = Path(sys._MEIPASS) / "app" / "web_dashboard.html"
@@ -49,8 +61,112 @@ def _template_path() -> Path:
     return Path(__file__).resolve().parent / "web_dashboard.html"
 
 
+def _session_key(settings) -> bytes:
+    raw = f"{settings.sms_secret}:{settings.web_password}:lottery_session_v1"
+    return hashlib.sha256(raw.encode("utf-8")).digest()
+
+
+def _create_session_cookie(settings, ttl: int = _SESSION_TTL) -> str:
+    exp = int(time.time()) + ttl
+    payload = str(exp)
+    sig = hmac.new(_session_key(settings), payload.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{payload}.{sig}"
+
+
+def _verify_session_cookie(cookie_val: str | None, settings) -> bool:
+    if not cookie_val or "." not in cookie_val:
+        return False
+    payload, sig = cookie_val.split(".", 1)
+    if not payload.isdigit():
+        return False
+    if int(payload) < int(time.time()):
+        return False
+    expected = hmac.new(_session_key(settings), payload.encode("ascii"), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig, expected)
+
+
+def _is_web_authenticated(request: Request, settings) -> bool:
+    if not settings.web_password:
+        return True
+    hdr_pw = request.headers.get("x-admin-password", "")
+    if hdr_pw and verify_web_password(hdr_pw, settings.web_password):
+        return True
+    return _verify_session_cookie(request.cookies.get(_COOKIE_NAME), settings)
+
+
+async def _read_json_obj(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {e}") from e
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    return body
+
+
+def _image_media_type(data: bytes) -> str:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith(b"GIF8"):
+        return "image/gif"
+    return "image/jpeg"
+
+
 def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
-    """Attach the Web Dashboard, Setup/Settings, Review Queue, Draw, and Excel Export routes."""
+    """Attach security middleware, Web Dashboard, Setup/Settings, Reports, and Backup routes."""
+
+    @app.middleware("http")
+    async def _security_middleware(request: Request, call_next):
+        path = request.url.path
+        if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
+            if not _is_web_authenticated(request, manager.settings):
+                resp = JSONResponse({"ok": False, "error": "Authentication required"}, status_code=401)
+                resp.headers["X-Content-Type-Options"] = "nosniff"
+                resp.headers["X-Frame-Options"] = "DENY"
+                resp.headers["Cache-Control"] = "no-store"
+                return resp
+
+        resp = await call_next(request)
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("X-Frame-Options", "DENY")
+        resp.headers.setdefault("Referrer-Policy", "same-origin")
+        if path.startswith("/api/"):
+            resp.headers.setdefault("Cache-Control", "no-store")
+        return resp
+
+    @app.get("/api/auth/status")
+    async def api_auth_status(request: Request):
+        return {
+            "password_required": bool(manager.settings.web_password),
+            "authenticated": _is_web_authenticated(request, manager.settings),
+        }
+
+    @app.post("/api/auth/login")
+    async def api_auth_login(request: Request):
+        body = await _read_json_obj(request)
+        password = str(body.get("password") or "")
+        if not manager.settings.web_password:
+            return {"ok": True, "password_required": False}
+        if not verify_web_password(password, manager.settings.web_password):
+            return JSONResponse({"ok": False, "error": "Invalid password"}, status_code=401)
+        resp = JSONResponse({"ok": True})
+        resp.set_cookie(
+            key=_COOKIE_NAME,
+            value=_create_session_cookie(manager.settings),
+            httponly=True,
+            samesite="lax",
+            max_age=_SESSION_TTL,
+            path="/",
+        )
+        return resp
+
+    @app.post("/api/auth/logout")
+    async def api_auth_logout():
+        resp = JSONResponse({"ok": True})
+        resp.delete_cookie(key=_COOKIE_NAME, path="/")
+        return resp
 
     def _sm():
         return manager.sm or getattr(app.state, "sm", None)
@@ -74,7 +190,7 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
 
     @app.post("/api/settings")
     async def api_save_settings(request: Request):
-        body = await request.json()
+        body = await _read_json_obj(request)
         start_after = bool(body.pop("start_after_save", False))
         # Preserve Docker container database/storage overrides if explicitly set in env
         if os.environ.get("DATABASE_URL"):
@@ -93,7 +209,19 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
         try:
             st = await manager.apply_settings(body, start_after=start_after)
             app.state.sm = manager.sm
-            return {"ok": True, "status": st, "settings": manager.settings.to_ui_dict()}
+            resp = JSONResponse({"ok": True, "status": st, "settings": manager.settings.to_ui_dict()})
+            if manager.settings.web_password:
+                resp.set_cookie(
+                    key=_COOKIE_NAME,
+                    value=_create_session_cookie(manager.settings),
+                    httponly=True,
+                    samesite="lax",
+                    max_age=_SESSION_TTL,
+                    path="/",
+                )
+            else:
+                resp.delete_cookie(key=_COOKIE_NAME, path="/")
+            return resp
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except Exception as e:
@@ -102,7 +230,7 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
 
     @app.post("/api/verify-token")
     async def api_verify_token(request: Request):
-        body = await request.json()
+        body = await _read_json_obj(request)
         token = str(body.get("bot_token", "")).strip()
         if not token:
             return JSONResponse({"ok": False, "error": "Please enter a Bot Token."}, status_code=400)
@@ -192,7 +320,8 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
             raise HTTPException(status_code=404)
         if p.image_path and os.path.exists(p.image_path):
             with open(p.image_path, "rb") as f:
-                return Response(content=f.read(), media_type="image/jpeg")
+                data = f.read()
+            return Response(content=data, media_type=_image_media_type(data))
         bot = _bot()
         if bot is not None and p.tg_file_id:
             try:
@@ -205,15 +334,21 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
                     out_f.write(data)
                 async with _sm()() as s, s.begin():
                     (await s.get(Payment, p.id)).image_path = path
-                return Response(content=data, media_type="image/jpeg")
+                return Response(content=data, media_type=_image_media_type(data))
             except Exception:
                 pass
         raise HTTPException(status_code=404, detail="Image not found")
 
     @app.post("/api/reviews/{pid}/approve")
     async def api_approve_review(pid: int, request: Request):
-        body = await request.json()
-        n = max(1, int(body.get("tickets", 1)))
+        body = await _read_json_obj(request)
+        max_allowed = max(manager.settings.max_tickets_per_payment, 1000)
+        try:
+            n = int(body.get("tickets", 1))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "Invalid ticket count"}, status_code=400)
+        if not (1 <= n <= max_allowed):
+            return JSONResponse({"ok": False, "error": f"Ticket count must be between 1 and {max_allowed}"}, status_code=400)
         try:
             async with _sm()() as s, s.begin():
                 p = await s.get(Payment, pid)
@@ -238,7 +373,7 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
 
     @app.post("/api/reviews/{pid}/reject")
     async def api_reject_review(pid: int, request: Request):
-        body = await request.json()
+        body = await _read_json_obj(request)
         reason = str(body.get("reason") or M.ADMIN_REJECTED).strip()
         try:
             async with _sm()() as s, s.begin():
@@ -271,7 +406,7 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
 
     @app.post("/api/credits/import-csv")
     async def api_import_csv(request: Request):
-        body = await request.json()
+        body = await _read_json_obj(request)
         csv_text = str(body.get("csv_text") or "")
         if not csv_text.strip():
             return JSONResponse({"ok": False, "error": "Empty CSV content"}, status_code=400)
@@ -291,7 +426,7 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
 
     @app.post("/api/credits/sms")
     async def api_manual_sms(request: Request):
-        body = await request.json()
+        body = await _read_json_obj(request)
         text = str(body.get("text") or "").strip()
         if not text:
             return JSONResponse({"ok": False, "error": "Please enter SMS text"}, status_code=400)
@@ -336,6 +471,40 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
             headers={"Content-Disposition": f'attachment; filename="{name}"'},
         )
 
+    @app.get("/api/backup")
+    async def api_backup():
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            if is_sqlite_url(manager.settings.database_url) and ":///" in manager.settings.database_url and ":memory:" not in manager.settings.database_url:
+                db_path = manager.settings.database_url.split(":///", 1)[1].split("?", 1)[0]
+                if os.path.exists(db_path):
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        snap = os.path.join(tmpdir, "lottery.db")
+                        src_conn = sqlite3.connect(db_path)
+                        dst_conn = sqlite3.connect(snap)
+                        try:
+                            src_conn.backup(dst_conn)
+                        finally:
+                            dst_conn.close()
+                            src_conn.close()
+                        zf.write(snap, arcname="lottery.db")
+            else:
+                zf.writestr(
+                    "POSTGRES_BACKUP_NOTE.txt",
+                    "PostgreSQL database is stored in Docker volume 'pgdata'.\n"
+                    "Back it up with: docker compose exec db pg_dump -U lottery lottery > lottery.sql\n",
+                )
+            for fname in ("config.json", "draw_seed.txt"):
+                fpath = manager.data_dir / fname
+                if fpath.exists():
+                    zf.write(fpath, arcname=fname)
+        stamp = datetime.now(EAT).strftime("%Y%m%d_%H%M%S")
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="lottery_backup_{stamp}.zip"'},
+        )
+
     @app.get("/api/draw/status")
     async def api_draw_status():
         seed_path = manager.data_dir / "draw_seed.txt"
@@ -362,11 +531,16 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
             return JSONResponse(
                 {"ok": False, "error": "Please click 'Generate Commitment' before running the draw."}, status_code=400
             )
-        body = await request.json()
+        body = await _read_json_obj(request)
         entropy = str(body.get("entropy") or "").strip()
         if not entropy:
             return JSONResponse({"ok": False, "error": "Please enter a public entropy value."}, status_code=400)
-        winners_n = max(1, int(body.get("winners", 1)))
+        try:
+            winners_n = int(body.get("winners", 1))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "Invalid winners count"}, status_code=400)
+        if winners_n < 1:
+            return JSONResponse({"ok": False, "error": "Winners count must be at least 1."}, status_code=400)
         one_per_person = bool(body.get("one_per_person", True))
 
         async with _sm()() as s:

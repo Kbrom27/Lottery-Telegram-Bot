@@ -170,6 +170,10 @@ class BotServiceManager:
             log.error("Background task %s crashed: %s", task.get_name(), exc)
             self.status = "error"
             self.last_error = f"{task.get_name()} stopped: {exc}"
+            self.started_at = None
+            for sibling in list(self.tasks):
+                if sibling is not task and not sibling.done():
+                    sibling.cancel()
 
     async def stop(self) -> dict[str, Any]:
         async with self._op_lock:
@@ -250,5 +254,7 @@ class BotServiceManager:
             "tesseract_available": bool(tess),
             "tesseract_path": tess or "",
             "sms_secret": self.settings.sms_secret,
+            "web_host": self.settings.web_host,
             "web_port": self.settings.web_port,
+            "web_password_set": bool(self.settings.web_password),
         }
