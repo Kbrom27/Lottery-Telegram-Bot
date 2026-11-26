@@ -130,14 +130,13 @@ jobs:
             Write-Error "Installer executable LotteryBot-Setup.exe was not generated!"
             exit 1
           }
+          Copy-Item "CLIENT_SETUP_GUIDE.txt" "installer_output\CLIENT_SETUP_GUIDE.txt"
 
       - name: Upload Windows Setup Installer (.exe)
         uses: actions/upload-artifact@v4
         with:
           name: LotteryBot-Setup
-          path: |
-            installer_output/LotteryBot-Setup.exe
-            CLIENT_SETUP_GUIDE.txt
+          path: installer_output
           retention-days: 30
 
   release:
@@ -155,7 +154,10 @@ jobs:
           path: release-files
 
       - name: Verify release assets
-        run: ls -lh release-files/
+        run: |
+          ls -lh release-files/
+          test -f release-files/LotteryBot-Setup.exe
+          test -f release-files/CLIENT_SETUP_GUIDE.txt
 
       - name: Publish Release
         uses: softprops/action-gh-release@v2
