@@ -63,3 +63,55 @@ def test_parse_text_roundtrip_json():
     from app.extract import Extracted
 
     assert Extracted.from_json(ex.to_json()).amount == Decimal("100.00")
+
+
+def test_telebirr_superapp_screenshot_and_web_receipt():
+    superapp = (
+        "Successful\n"
+        "-100.00 (ETB)\n"
+        "Transaction Time: 2026/11/27 05:30:12\n"
+        "Transaction Type: Transfer Money\n"
+        "Transaction To: ABEL ONLINE\n"
+        "Transaction Number: DCI74X9K2P\n"
+    )
+    ex1 = parse_text(superapp)
+    assert ex1.transaction_id == "DCI74X9K2P"
+    assert ex1.amount == Decimal("100.00")
+
+    web_receipt = (
+        "Telebirr Transaction Receipt\n"
+        "Payer Name: Dawit Tesfaye\n"
+        "Receipt No. DCI74X9K2P\n"
+        "Settled Amount: 200.00 Birr\n"
+        "Service Fee: 1.00 Birr\n"
+        "Total Paid Amount: 201.00 Birr\n"
+    )
+    ex2 = parse_text(web_receipt)
+    assert ex2.transaction_id == "DCI74X9K2P"
+    assert ex2.amount == Decimal("200.00")
+    assert ex2.sender == "Dawit Tesfaye"
+    assert ex2.provider == "telebirr"
+
+
+def test_telebirr_127_and_cbe_incoming_sms_parsing():
+    tb_sms = (
+        "Dear Abel, You have received ETB 100.00 from Abebe Kebede(251911223344) "
+        "on 27/11/2026 05:30:12. Your transaction number is DCI74X9K2P. "
+        "Your current balance is ETB 5,200.00. Thank you for using telebirr."
+    )
+    c1 = parse_credit_sms(tb_sms)
+    assert c1 is not None
+    assert c1.reference == "DCI74X9K2P"
+    assert c1.amount == Decimal("100.00")
+    assert c1.sender == "Abebe Kebede"
+
+    cbe_sms = (
+        "Dear Abel your Account 1*****6789 has been Credited with ETB 300.00 "
+        "from Selamawit Tadesse, on 27/11/2026 at 05:30:12 with Ref No FT26331ABCDE "
+        "Your Current Balance is ETB 12,500.00. Thank you for Banking with CBE!"
+    )
+    c2 = parse_credit_sms(cbe_sms)
+    assert c2 is not None
+    assert c2.reference == "FT26331ABCDE"
+    assert c2.amount == Decimal("300.00")
+    assert c2.sender == "Selamawit Tadesse"

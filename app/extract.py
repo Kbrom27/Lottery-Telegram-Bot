@@ -48,13 +48,17 @@ _GENERIC_REF = re.compile(r"\b(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{9,16}\b"
 
 _NUM = r"(\d[\d,]*(?:\.\d{1,2})?)"
 _AMOUNT_PATTERNS = [
-    re.compile(r"(?:total\s+amount|amount\s+paid|amount\s+sent|amount|total)[^\d]{0,25}?" + _NUM, re.I),
-    re.compile(r"(?:ETB|Birr|BR)\.?\s*" + _NUM, re.I),
-    re.compile(_NUM + r"\s*(?:ETB|Birr|BR)\b", re.I),
+    re.compile(
+        r"(?:settled\s+amount|total\s+paid\s+amount|total\s+amount|amount\s+paid|amount\s+sent|transferred\s+amount|amount|total)[^\d]{0,25}?"
+        + _NUM,
+        re.I,
+    ),
+    re.compile(r"(?:ETB|Birr|BR)\.?\s*-?" + _NUM, re.I),
+    re.compile(_NUM + r"\s*\(?\s*(?:ETB|Birr|BR)\b\s*\)?", re.I),
 ]
 _SENDER = re.compile(
-    r"\b(?:from|by|sender)\s*:?\s+([A-Za-z][A-Za-z .'\-]{2,60}?)"
-    r"(?=\s+(?:(?:on|at|with|via|ref|transaction|trans)\b|\d)|[.,]|\s*$)",
+    r"\b(?:payer\s+name|from|by|sender)\s*:?\s+([A-Za-z][A-Za-z .'\-]{2,60}?)"
+    r"(?=\s+(?:(?:on|at|with|via|ref|transaction|trans)\b|\d)|[.,(\r\n]|\s*$)",
     re.I | re.M,
 )
 _PROVIDERS = {
