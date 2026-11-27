@@ -106,8 +106,10 @@ async def test_image_document_is_accepted_and_plain_text_gets_a_hint(tg):
     await tg.send(ALICE, doc_mime="image/png")
     await tg.send(ALICE, "hello?")
     assert tg.session.texts(ALICE) == [M.RECEIVED, M.SEND_SCREENSHOT]
-    await tg.send(ALICE, doc_mime="application/pdf")  # not an image -> ignored
-    assert len(tg.session.calls) == 2
+    await tg.send(ALICE, doc_mime="application/pdf")  # PDF receipts are now accepted
+    assert tg.session.texts(ALICE)[-1] == M.RECEIVED
+    await tg.send(ALICE, doc_mime="application/zip")  # non-image/non-pdf -> ignored
+    assert len(tg.session.calls) == 3
 
 
 async def test_open_payment_limit(tg):

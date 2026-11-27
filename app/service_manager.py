@@ -257,4 +257,6 @@ class BotServiceManager:
             "web_host": self.settings.web_host,
             "web_port": self.settings.web_port,
             "web_password_set": bool(self.settings.web_password),
+            "max_total_tickets": self.settings.max_total_tickets,
+            "allow_split_payments": self.settings.allow_split_payments,
         }

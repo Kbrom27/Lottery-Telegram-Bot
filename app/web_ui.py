@@ -1,6 +1,7 @@
 """Web-based Control Panel, Setup Wizard, Live Dashboard, and Report Exports."""
 from __future__ import annotations
 
+import asyncio
 import csv
 import hashlib
 import hmac
@@ -23,16 +24,16 @@ from pathlib import Path
 from aiogram import Bot
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
-from sqlalchemy import desc, select
+from sqlalchemy import delete, desc, func, select, update
 
 import draw as draw_lib
 
 from . import messages as M
 from .bot import safe_send
-from .config import EAT, build_payment_instructions, verify_web_password
+from .config import EAT, build_payment_instructions, save_desktop_settings, verify_web_password
 from .db import is_sqlite_url
 from .extract import normalize_ref
-from .models import BankCredit, Payment, Ticket, User
+from .models import AuditLog, BankCredit, Counter, Payment, Ticket, User
 from .reports import (
     build_holders_excel,
     build_summary_report_excel,
@@ -40,7 +41,7 @@ from .reports import (
     get_dashboard_summary,
     get_holders_data,
 )
-from .service import CreditAlreadyClaimed, InvalidState, approve, reject
+from .service import CreditAlreadyClaimed, InvalidState, SoldOutError, approve, reject, void_payment
 from .service_manager import BotServiceManager
 from .sms import add_credit, ingest_sms
 from .verify import find_credit
@@ -318,22 +319,38 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
             p = await s.get(Payment, pid)
         if not p:
             raise HTTPException(status_code=404)
+        if p.tg_file_id and p.tg_file_id.startswith("url:"):
+            link = p.tg_file_id[4:].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            svg = (
+                '<svg xmlns="http://www.w3.org/2000/svg" width="420" height="180">'
+                '<rect width="100%" height="100%" fill="#eff6ff" rx="12"/>'
+                '<text x="20" y="55" font-family="sans-serif" font-size="18" font-weight="bold" fill="#1d4ed8">CBE Receipt Link</text>'
+                f'<text x="20" y="95" font-family="monospace" font-size="11" fill="#334155">{link[:58]}</text>'
+                f'<text x="20" y="115" font-family="monospace" font-size="11" fill="#334155">{link[58:116]}</text>'
+                "</svg>"
+            )
+            return Response(content=svg.encode("utf-8"), media_type="image/svg+xml")
         if p.image_path and os.path.exists(p.image_path):
             with open(p.image_path, "rb") as f:
                 data = f.read()
+            if data.startswith(b"%PDF"):
+                return Response(content=data, media_type="application/pdf")
             return Response(content=data, media_type=_image_media_type(data))
         bot = _bot()
-        if bot is not None and p.tg_file_id:
+        if bot is not None and p.tg_file_id and not p.tg_file_id.startswith("cash:"):
             try:
                 f_info = await bot.get_file(p.tg_file_id)
                 buf = await bot.download_file(f_info.file_path)
                 data = buf.read()
                 os.makedirs(manager.settings.storage_dir, exist_ok=True)
-                path = os.path.join(manager.settings.storage_dir, f"{p.id}.img")
+                ext = "pdf" if data.startswith(b"%PDF") else "img"
+                path = os.path.join(manager.settings.storage_dir, f"{p.id}.{ext}")
                 with open(path, "wb") as out_f:
                     out_f.write(data)
                 async with _sm()() as s, s.begin():
                     (await s.get(Payment, p.id)).image_path = path
+                if data.startswith(b"%PDF"):
+                    return Response(content=data, media_type="application/pdf")
                 return Response(content=data, media_type=_image_media_type(data))
             except Exception:
                 pass
@@ -356,20 +373,220 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
                     return JSONResponse({"ok": False, "error": "Payment not found"}, status_code=404)
                 credit = await find_credit(s, p.transaction_id) if p.transaction_id else None
                 cid = credit.id if credit and credit.claimed_by_payment_id in (None, pid) else None
-                numbers = await approve(s, pid, n, "web_admin", cid)
-                if cid is None and p.amount is None:
-                    p.amount = Decimal(n) * manager.settings.ticket_price
+                numbers = await approve(
+                    s,
+                    pid,
+                    n,
+                    "web_admin",
+                    cid,
+                    max_total_tickets=manager.settings.max_total_tickets,
+                    ticket_price=manager.settings.ticket_price,
+                )
                 tg_id = (await s.get(User, p.user_id)).telegram_id
-        except (InvalidState, CreditAlreadyClaimed) as e:
+        except (InvalidState, CreditAlreadyClaimed, SoldOutError) as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
         formatted = [manager.settings.fmt(x) for x in numbers]
         bot = _bot()
-        if bot is not None:
+        if bot is not None and tg_id > 0:
             await safe_send(bot, tg_id, M.APPROVED.format(numbers=", ".join(formatted)))
         return {"ok": True, "numbers": formatted}
+
+    @app.post("/api/tickets/manual")
+    async def api_manual_ticket(request: Request):
+        body = await _read_json_obj(request)
+        full_name = str(body.get("full_name") or "").strip()
+        if not full_name:
+            return JSONResponse({"ok": False, "error": "Holder full name is required."}, status_code=400)
+        phone = str(body.get("phone") or "").strip() or None
+        ref_raw = str(body.get("reference") or "").strip()
+        tx_ref = normalize_ref(ref_raw) if ref_raw else None
+        note = str(body.get("note") or "").strip() or None
+        max_allowed = max(manager.settings.max_tickets_per_payment, 1000)
+        try:
+            n = int(body.get("tickets", 1))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "Invalid ticket count."}, status_code=400)
+        if not (1 <= n <= max_allowed):
+            return JSONResponse({"ok": False, "error": f"Ticket count must be between 1 and {max_allowed}."}, status_code=400)
+        custom_amt = None
+        if body.get("amount") not in (None, ""):
+            try:
+                custom_amt = Decimal(str(body["amount"]))
+                if custom_amt <= 0:
+                    raise ValueError
+            except Exception:
+                return JSONResponse({"ok": False, "error": "Invalid amount value."}, status_code=400)
+
+        try:
+            async with _sm()() as s, s.begin():
+                min_tg = (await s.execute(select(func.min(User.telegram_id)))).scalar_one_or_none() or 0
+                neg_tg_id = min(0, int(min_tg)) - 1
+                u = User(telegram_id=neg_tg_id, full_name=full_name, username=None, phone=phone)
+                s.add(u)
+                await s.flush()
+                p = Payment(
+                    user_id=u.id,
+                    tg_file_id=f"cash:{secrets.token_hex(8)}",
+                    transaction_id=tx_ref,
+                    provider="cash",
+                    status="verifying",
+                    reject_reason=note,
+                )
+                s.add(p)
+                await s.flush()
+                numbers = await approve(
+                    s,
+                    p.id,
+                    n,
+                    "web_admin_cash",
+                    max_total_tickets=manager.settings.max_total_tickets,
+                    ticket_price=manager.settings.ticket_price,
+                )
+                if custom_amt is not None:
+                    p.amount = custom_amt
+                pid = p.id
+        except SoldOutError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+        formatted = [manager.settings.fmt(x) for x in numbers]
+        return {"ok": True, "payment_id": pid, "numbers": formatted}
+
+    @app.post("/api/payments/{pid}/void")
+    async def api_void_payment(pid: int, request: Request):
+        body = await _read_json_obj(request)
+        reason = str(body.get("reason") or "Voided by organizer").strip()
+        try:
+            async with _sm()() as s, s.begin():
+                nums, tg_id = await void_payment(s, pid, reason, "web_admin")
+        except InvalidState as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+        formatted = [manager.settings.fmt(x) for x in nums]
+        bot = _bot()
+        if bot is not None and tg_id > 0 and formatted:
+            await safe_send(bot, tg_id, M.VOIDED.format(numbers=", ".join(formatted), reason=reason))
+        return {"ok": True, "voided_numbers": formatted}
+
+    @app.post("/api/broadcast")
+    async def api_broadcast(request: Request):
+        body = await _read_json_obj(request)
+        text = str(body.get("message") or "").strip()
+        if not text:
+            return JSONResponse({"ok": False, "error": "Please enter an announcement message."}, status_code=400)
+        audience = str(body.get("audience") or "holders").strip().lower()
+        bot = _bot()
+        if bot is None:
+            return JSONResponse(
+                {"ok": False, "error": "Bot Service must be running to send Telegram messages."}, status_code=400
+            )
+        async with _sm()() as s:
+            if audience == "all":
+                tg_ids = list(
+                    (await s.execute(select(User.telegram_id).where(User.telegram_id > 0))).scalars().all()
+                )
+            else:
+                tg_ids = list(
+                    (
+                        await s.execute(
+                            select(User.telegram_id)
+                            .join(Ticket, Ticket.user_id == User.id)
+                            .where(User.telegram_id > 0, Ticket.is_voided.is_(False))
+                            .distinct()
+                        )
+                    ).scalars().all()
+                )
+        sent = failed = 0
+        for tg_id in tg_ids:
+            res = await safe_send(bot, int(tg_id), text)
+            if res is not None:
+                sent += 1
+            else:
+                failed += 1
+            if len(tg_ids) > 1:
+                await asyncio.sleep(0.05)
+        return {"ok": True, "total": len(tg_ids), "sent": sent, "failed": failed}
+
+    @app.post("/api/campaign/reset")
+    async def api_campaign_reset(request: Request):
+        body = await _read_json_obj(request)
+        if str(body.get("confirm") or "").strip().upper() != "RESET":
+            return JSONResponse({"ok": False, "error": "Type RESET to confirm archiving and clearing this round."}, status_code=400)
+        new_name = str(body.get("new_campaign_name") or "").strip()
+
+        async with manager._op_lock:
+            was_running = manager.status == "running"
+            if was_running:
+                await manager._stop_unlocked()
+
+            # 1. Create a full archive ZIP inside <data_dir>/archives/
+            archives_dir = manager.data_dir / "archives"
+            archives_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(EAT).strftime("%Y%m%d_%H%M%S")
+            archive_path = archives_dir / f"round_archive_{stamp}.zip"
+
+            async with _sm()() as s:
+                holders_xlsx, _ = await build_holders_excel(s, manager.settings)
+                summary_xlsx = await build_summary_report_excel(s, manager.settings)
+
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("lottery_tickets.xlsx", holders_xlsx)
+                zf.writestr("lottery_summary_report.xlsx", summary_xlsx)
+                if (
+                    is_sqlite_url(manager.settings.database_url)
+                    and ":///" in manager.settings.database_url
+                    and ":memory:" not in manager.settings.database_url
+                ):
+                    db_path = manager.settings.database_url.split(":///", 1)[1].split("?", 1)[0]
+                    if os.path.exists(db_path):
+                        with tempfile.TemporaryDirectory() as tmpdir:
+                            snap = os.path.join(tmpdir, "lottery.db")
+                            src_conn = sqlite3.connect(db_path)
+                            dst_conn = sqlite3.connect(snap)
+                            try:
+                                src_conn.backup(dst_conn)
+                            finally:
+                                dst_conn.close()
+                                src_conn.close()
+                            zf.write(snap, arcname="lottery.db")
+                for fname in ("config.json", "draw_seed.txt"):
+                    fpath = manager.data_dir / fname
+                    if fpath.exists():
+                        zf.write(fpath, arcname=fname)
+
+            # 2. Clear current round tables and reset counter while keeping config.json intact
+            async with _sm()() as s, s.begin():
+                await s.execute(delete(Ticket))
+                await s.execute(delete(BankCredit))
+                await s.execute(delete(AuditLog))
+                await s.execute(delete(Payment))
+                await s.execute(delete(User))
+                await s.execute(
+                    update(Counter).where(Counter.id == 1).values(next_number=manager.settings.first_ticket_number)
+                )
+
+            seed_path = manager.data_dir / "draw_seed.txt"
+            if seed_path.exists():
+                seed_path.unlink()
+
+            if new_name and (manager.data_dir / "config.json").exists():
+                manager.settings = save_desktop_settings({"campaign_name": new_name}, manager.data_dir)
+
+            if was_running:
+                await manager._start_unlocked()
+
+        return {
+            "ok": True,
+            "archive_path": str(archive_path),
+            "next_ticket_formatted": manager.settings.fmt(manager.settings.first_ticket_number),
+            "campaign_name": manager.settings.campaign_name,
+        }
 
     @app.post("/api/reviews/{pid}/reject")
     async def api_reject_review(pid: int, request: Request):
@@ -546,8 +763,9 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
         async with _sm()() as s:
             rows = (
                 await s.execute(
-                    select(Ticket.number, User.telegram_id, User.full_name, User.username)
+                    select(Ticket.number, User.telegram_id, User.full_name, User.username, User.phone)
                     .join(User, User.id == Ticket.user_id)
+                    .where(Ticket.is_voided.is_(False))
                     .order_by(Ticket.number)
                 )
             ).all()
@@ -555,10 +773,14 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
             return JSONResponse({"ok": False, "error": "No tickets have been issued yet."}, status_code=400)
 
         by_num = {
-            int(n): {"full_name": fn or "", "username": f"@{un}" if un else "", "telegram_id": int(tg)}
-            for n, tg, fn, un in rows
+            int(n): {
+                "full_name": fn or "",
+                "username": f"@{un}" if un else (ph or ("Offline / Cash" if int(tg) < 0 else "")),
+                "telegram_id": int(tg),
+            }
+            for n, tg, fn, un, ph in rows
         }
-        pool = [(int(n), str(tg)) for n, tg, _fn, _un in rows]
+        pool = [(int(n), str(tg)) for n, tg, _fn, _un, _ph in rows]
         seed = seed_path.read_text(encoding="utf-8").strip()
         picked = draw_lib.pick_winners(seed, entropy, pool, winners_n, one_per_person)
 
@@ -583,6 +805,38 @@ def mount_web_routes(app: FastAPI, manager: BotServiceManager) -> None:
             "total_tickets": len(pool),
             "winners": out,
         }
+
+    @app.post("/api/draw/notify-winners")
+    async def api_draw_notify_winners(request: Request):
+        body = await _read_json_obj(request)
+        winners = body.get("winners")
+        if not isinstance(winners, list) or not winners:
+            return JSONResponse({"ok": False, "error": "No winners supplied."}, status_code=400)
+        bot = _bot()
+        if bot is None:
+            return JSONResponse(
+                {"ok": False, "error": "Bot Service must be running to message winners on Telegram."}, status_code=400
+            )
+        sent = skipped_offline = failed = 0
+        for w in winners:
+            if not isinstance(w, dict):
+                continue
+            tg_id = int(w.get("telegram_id") or 0)
+            if tg_id <= 0:
+                skipped_offline += 1
+                continue
+            msg = M.WINNER_DM.format(
+                number=w.get("formatted") or str(w.get("number") or ""),
+                rank=w.get("rank") or 1,
+                campaign_name=manager.settings.campaign_name,
+            )
+            res = await safe_send(bot, tg_id, msg)
+            if res is not None:
+                sent += 1
+            else:
+                failed += 1
+            await asyncio.sleep(0.05)
+        return {"ok": True, "sent": sent, "skipped_offline": skipped_offline, "failed": failed}
 
     @app.get("/api/logs")
     async def api_logs():

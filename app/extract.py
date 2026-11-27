@@ -250,6 +250,61 @@ def _try_cbe_url(text: str, raw_text: str | None = None, source: str = "QR") -> 
     )
 
 
+def has_cbe_url(text: str | None) -> bool:
+    return bool(text and _CBE_URL_RE.search(text))
+
+
+def find_cbe_url(text: str | None) -> str | None:
+    if not text:
+        return None
+    m = _CBE_URL_RE.search(text)
+    return m.group(0) if m else None
+
+
+def extract_cbe_link(text: str) -> Extracted | None:
+    """Resolve a pasted CBE receipt link directly against CBE's verification API."""
+    return _try_cbe_url(text, raw_text=text, source="LINK")
+
+
+def extract_pdf(pdf_bytes: bytes) -> Extracted:
+    """Extract CBE receipt URL or transaction details from a PDF receipt (pure-Python)."""
+    chunks: list[str] = []
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        for page in reader.pages:
+            txt = page.extract_text() or ""
+            if txt:
+                chunks.append(txt)
+            annots = page.get("/Annots") or []
+            for annot_ref in annots:
+                try:
+                    annot = annot_ref.get_object()
+                    action = annot.get("/A")
+                    if action:
+                        uri = action.get("/URI")
+                        if uri:
+                            chunks.append(str(uri))
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    # Fallback: scan raw PDF bytes for uncompressed CBE URLs
+    raw_latin = pdf_bytes.decode("latin-1", errors="ignore")
+    for m in _CBE_URL_RE.finditer(raw_latin):
+        chunks.append(m.group(0))
+
+    combined = "\n".join(chunks).strip()
+    if combined:
+        cbe_ex = _try_cbe_url(combined, raw_text=combined, source="PDF")
+        if cbe_ex:
+            return cbe_ex
+        return parse_text(combined)
+    return Extracted(raw_text="[PDF unreadable: no text or CBE receipt URL found]")
+
+
 class TesseractExtractor:
     """Classic OCR with QR/barcode scanning. Uses zxing-cpp natively and tesseract if installed."""
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import JSON, BigInteger, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, TypeDecorator, text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, TypeDecorator, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -43,6 +43,8 @@ class User(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True)
     username: Mapped[str | None] = mapped_column(String(64))
     full_name: Mapped[str | None] = mapped_column(String(256))
+    phone: Mapped[str | None] = mapped_column(String(64), default=None)
+    credit_balance: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
@@ -55,6 +57,7 @@ class Payment(Base):
     image_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
     transaction_id: Mapped[str | None] = mapped_column(String(40))
     amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    overpayment_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
     provider: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(16), default="received")
     # Shown to the user when status == "rejected"; internal note when status == "review".
@@ -85,6 +88,7 @@ class Ticket(Base):
     number: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     payment_id: Mapped[int] = mapped_column(ForeignKey("payments.id"), index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    is_voided: Mapped[bool] = mapped_column(Boolean, default=False)
     issued_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 

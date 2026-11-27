@@ -15,6 +15,7 @@ hiddenimports = [
     "pystray._win32",
     "zxingcpp",
     "openpyxl",
+    "pypdf",
     "pytesseract",
     "PIL.Image",
     "PIL.ImageDraw",
@@ -39,6 +40,7 @@ hiddenimports = [
 hiddenimports += collect_submodules("uvicorn")
 hiddenimports += collect_submodules("anthropic")
 hiddenimports += collect_submodules("openpyxl")
+hiddenimports += collect_submodules("pypdf")
 hiddenimports += [m for m in collect_submodules("aiogram") if not m.startswith("aiogram.test")]
 
 a = Analysis(

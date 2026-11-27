@@ -23,9 +23,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from . import messages as M
 from .config import Settings
 from .db import is_sqlite_url
-from .extract import Extracted
+from .extract import Extracted, extract_cbe_link, extract_pdf
 from .models import Payment, User, utcnow
-from .service import CreditAlreadyClaimed, approve, reject, schedule_retry, send_to_review
+from .service import CreditAlreadyClaimed, SoldOutError, approve, credit_wallet, reject, schedule_retry, send_to_review
 from .sms import add_credit
 from .verify import Verdict, decide
 
@@ -125,11 +125,17 @@ class Worker:
             payment = await s.get(Payment, payment_id)
             tg_id = (await s.get(User, payment.user_id)).telegram_id
 
-        data = await self._load_image(payment)
-        if data is None:
-            return await self._finish(payment_id, Verdict("reject", M.NOT_AN_IMAGE))
+        is_url_receipt = bool(payment.tg_file_id and payment.tg_file_id.startswith("url:"))
+        if is_url_receipt:
+            url_str = payment.tg_file_id[4:].strip()
+            sha = hashlib.sha256(url_str.encode("utf-8")).hexdigest()
+            data = None
+        else:
+            data = await self._load_image(payment)
+            if data is None:
+                return await self._finish(payment_id, Verdict("reject", M.NOT_AN_IMAGE), tg_id)
+            sha = hashlib.sha256(data).hexdigest()
 
-        sha = hashlib.sha256(data).hexdigest()
         async with self.sm() as s, s.begin():
             p = await s.get(Payment, payment_id)
             p.image_sha256 = sha
@@ -138,15 +144,26 @@ class Worker:
                     select(Payment.id).where(
                         Payment.image_sha256 == sha,
                         Payment.id < payment_id,  # the earlier submission wins; avoids mutual rejection
-                        Payment.status.in_(("received", "verifying", "review", "approved")),
+                        Payment.status.in_(("received", "verifying", "review", "approved", "credited")),
                     )
                 )
             ).first()
         if dup:
-            return await self._finish(payment_id, Verdict("reject", M.DUPLICATE_IMAGE))
+            return await self._finish(payment_id, Verdict("reject", M.DUPLICATE_IMAGE), tg_id)
 
         if payment.extracted is None:
-            ex = await asyncio.to_thread(self.extractor.extract, data)
+            if is_url_receipt:
+                ex = await asyncio.to_thread(extract_cbe_link, url_str)
+                if ex is None:
+                    return await self._finish(
+                        payment_id,
+                        Verdict("review", f"Could not verify CBE receipt link ({url_str}) automatically"),
+                        tg_id,
+                    )
+            elif data and data.startswith(b"%PDF"):
+                ex = await asyncio.to_thread(extract_pdf, data)
+            else:
+                ex = await asyncio.to_thread(self.extractor.extract, data)
             async with self.sm() as s, s.begin():
                 p = await s.get(Payment, payment_id)
                 p.extracted = ex.to_json()
@@ -189,11 +206,11 @@ class Worker:
                         raw_text=vc.get("raw_text"),
                     )
 
-        # If local OCR isn't installed and no CBE QR code was found, route to manual review rather than rejecting
-        if not ex.transaction_id and ex.raw_text.startswith("[OCR unavailable"):
+        # If local OCR isn't installed or PDF has no extractable text/link, route to manual review rather than rejecting
+        if not ex.transaction_id and (ex.raw_text.startswith("[OCR unavailable") or ex.raw_text.startswith("[PDF unreadable")):
             return await self._finish(
                 payment_id,
-                Verdict("review", "No CBE QR code found and Tesseract OCR is not installed on this PC"),
+                Verdict("review", ex.raw_text),
                 tg_id,
             )
 
@@ -209,10 +226,13 @@ class Worker:
         else:
             data = await self.fetch_file(payment.tg_file_id)
             os.makedirs(self.settings.storage_dir, exist_ok=True)
-            path = os.path.join(self.settings.storage_dir, f"{payment.id}.img")
+            ext = "pdf" if data.startswith(b"%PDF") else "img"
+            path = os.path.join(self.settings.storage_dir, f"{payment.id}.{ext}")
             await asyncio.to_thread(_write, path, data)
             async with self.sm() as s, s.begin():
                 (await s.get(Payment, payment.id)).image_path = path
+        if data.startswith(b"%PDF"):
+            return data
         try:
             await asyncio.to_thread(_verify_image, data)
         except Exception:
@@ -228,11 +248,49 @@ class Worker:
         if verdict.outcome == "approve":
             try:
                 async with self.sm() as s, s.begin():
-                    numbers = await approve(s, payment_id, verdict.tickets, "auto", verdict.credit_id)
+                    numbers = await approve(
+                        s,
+                        payment_id,
+                        verdict.tickets,
+                        "auto",
+                        verdict.credit_id,
+                        max_total_tickets=self.settings.max_total_tickets,
+                        ticket_price=self.settings.ticket_price,
+                        new_balance=verdict.new_balance,
+                    )
+            except (IntegrityError, CreditAlreadyClaimed):
+                verdict = Verdict("reject", M.ALREADY_USED)
+            except SoldOutError as e:
+                verdict = Verdict(
+                    "review",
+                    f"Campaign ticket cap reached ({e.remaining} remaining, payment needs {verdict.tickets}); requires admin decision/refund",
+                )
+            else:
+                nums_str = ", ".join(self.settings.fmt(n) for n in numbers)
+                if verdict.new_balance is not None and verdict.new_balance > 0:
+                    text = M.APPROVED_WITH_BALANCE.format(
+                        numbers=nums_str,
+                        balance=f"{verdict.new_balance.normalize():f}",
+                    )
+                else:
+                    text = M.APPROVED.format(numbers=nums_str)
+                await self.notify(tg_id, text)
+                return
+
+        if verdict.outcome == "credit_wallet":
+            try:
+                async with self.sm() as s, s.begin():
+                    added, new_bal = await credit_wallet(s, payment_id, verdict.credit_id, "auto")
             except (IntegrityError, CreditAlreadyClaimed):
                 verdict = Verdict("reject", M.ALREADY_USED)
             else:
-                text = M.APPROVED.format(numbers=", ".join(self.settings.fmt(n) for n in numbers))
+                rem = max(Decimal("0"), self.settings.ticket_price - new_bal)
+                text = M.WALLET_CREDITED.format(
+                    added=f"{added.normalize():f}",
+                    balance=f"{new_bal.normalize():f}",
+                    remaining=f"{rem.normalize():f}",
+                    price=f"{self.settings.ticket_price.normalize():f}",
+                )
                 await self.notify(tg_id, text)
                 return
 

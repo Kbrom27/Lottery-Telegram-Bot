@@ -99,6 +99,8 @@ class Settings:
     # Campaign rules
     ticket_price: Decimal = Decimal("100")
     max_tickets_per_payment: int = 50
+    max_total_tickets: int = 0  # 0 = unlimited; >0 closes sales once reached
+    allow_split_payments: bool = True  # Combine partial transfers (e.g. 50+50=100) via wallet balance
     first_ticket_number: int = 1
     ticket_width: int = 5  # #00001 ... #10000
     campaign_unbounded: bool = True
@@ -150,6 +152,8 @@ class Settings:
             "admin_ids": ", ".join(str(x) for x in sorted(self.admin_ids)),
             "ticket_price": f"{self.ticket_price.normalize():f}",
             "max_tickets_per_payment": self.max_tickets_per_payment,
+            "max_total_tickets": self.max_total_tickets,
+            "allow_split_payments": self.allow_split_payments,
             "first_ticket_number": self.first_ticket_number,
             "ticket_width": self.ticket_width,
             "campaign_unbounded": self.campaign_unbounded,
@@ -199,6 +203,8 @@ class Settings:
             ),
             ticket_price=Decimal(get("TICKET_PRICE", str(d.ticket_price))),
             max_tickets_per_payment=int(get("MAX_TICKETS_PER_PAYMENT", str(d.max_tickets_per_payment))),
+            max_total_tickets=int(get("MAX_TOTAL_TICKETS", str(d.max_total_tickets))),
+            allow_split_payments=get("ALLOW_SPLIT_PAYMENTS", "true").lower() in ("1", "true", "yes"),
             first_ticket_number=int(get("FIRST_TICKET_NUMBER", str(d.first_ticket_number))),
             ticket_width=int(get("TICKET_WIDTH", str(d.ticket_width))),
             campaign_unbounded=unbounded,
@@ -277,6 +283,8 @@ def load_desktop_settings(data_dir: Path | None = None) -> Settings:
         admin_ids=parse_admin_ids(raw.get("admin_ids", "")),
         ticket_price=price,
         max_tickets_per_payment=int(raw.get("max_tickets_per_payment", 50)),
+        max_total_tickets=int(raw.get("max_total_tickets", 0)),
+        allow_split_payments=bool(raw.get("allow_split_payments", True)),
         first_ticket_number=int(raw.get("first_ticket_number", 1)),
         ticket_width=int(raw.get("ticket_width", 5)),
         campaign_unbounded=unbounded,

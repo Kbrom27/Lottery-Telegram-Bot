@@ -6,7 +6,7 @@ import os
 from contextlib import asynccontextmanager
 from weakref import WeakKeyDictionary
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
@@ -83,9 +83,30 @@ def dialect_insert(session_or_conn, model):
     return sqlite_insert(model) if name == "sqlite" else pg_insert(model)
 
 
+_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("users", "phone", "VARCHAR(64)"),
+    ("users", "credit_balance", "NUMERIC(12, 2) NOT NULL DEFAULT 0"),
+    ("payments", "overpayment_amount", "NUMERIC(12, 2) NOT NULL DEFAULT 0"),
+    ("tickets", "is_voided", "BOOLEAN NOT NULL DEFAULT FALSE"),
+]
+
+
+def _apply_schema_migrations(sync_conn) -> None:
+    """Safely add new columns to existing SQLite or PostgreSQL databases on upgrade."""
+    insp = inspect(sync_conn)
+    existing_tables = set(insp.get_table_names())
+    for table, col, sql_def in _COLUMN_MIGRATIONS:
+        if table not in existing_tables:
+            continue
+        cols = {c["name"] for c in insp.get_columns(table)}
+        if col not in cols:
+            sync_conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {sql_def}"))
+
+
 async def init_db(engine: AsyncEngine, settings: Settings) -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_apply_schema_migrations)
         ins = dialect_insert(conn, Counter)
         await conn.execute(
             ins.values(id=1, next_number=settings.first_ticket_number).on_conflict_do_nothing()

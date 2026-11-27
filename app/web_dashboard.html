@@ -263,6 +263,31 @@
 
     <div class="card">
       <div class="card-header">
+        <h2 class="card-title">💵 Issue Cash / Manual Offline Ticket</h2>
+      </div>
+      <div class="grid-2" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
+        <div class="form-group">
+          <label>Holder Full Name *</label>
+          <input id="man_name" type="text" placeholder="e.g. Dawit Hailu">
+        </div>
+        <div class="form-group">
+          <label>Phone / Contact (Optional)</label>
+          <input id="man_phone" type="text" placeholder="e.g. 0911223344">
+        </div>
+        <div class="form-group">
+          <label>Tickets Count *</label>
+          <input id="man_tickets" type="number" min="1" max="500" value="1">
+        </div>
+        <div class="form-group">
+          <label>Receipt Ref / Note (Optional)</label>
+          <input id="man_ref" type="text" placeholder="e.g. CASH-001">
+        </div>
+      </div>
+      <button type="button" class="btn-start" onclick="issueManualTicket()">➕ Issue Cash Ticket(s)</button>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
         <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
           <h2 class="card-title">🎟 Issued Lottery Numbers</h2>
           <div class="seg">
@@ -379,6 +404,24 @@
       </div>
       <div id="drawResult" style="margin-top:16px;"></div>
     </div>
+
+    <div class="card">
+      <div class="card-header"><h2 class="card-title">📣 Broadcast Announcement to Telegram Users</h2></div>
+      <p class="hint">Send an announcement (e.g., draw time, winner announcement, or closing reminder) directly to participants on Telegram.</p>
+      <div class="form-group">
+        <label>Audience</label>
+        <select id="bcAudience" style="max-width:320px;">
+          <option value="holders">Active Ticket Holders Only</option>
+          <option value="all">All Registered Bot Users</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Message Text</label>
+        <textarea id="bcMessage" rows="3" placeholder="e.g. The official draw for Abel Online Lottery will go live tonight at 8:00 PM!"></textarea>
+      </div>
+      <button type="button" class="btn-primary" onclick="sendBroadcast()">📣 Send Telegram Broadcast</button>
+      <div id="bcStatus" class="hint" style="margin-top:8px;"></div>
+    </div>
   </section>
 
   <!-- SETTINGS / FIRST-RUN SETUP TAB -->
@@ -424,6 +467,11 @@
             <input id="cfg_max_tickets" type="number" min="1" max="1000" value="50" required>
           </div>
           <div class="form-group">
+            <label>Max Total Tickets Cap (0 = Unlimited / Sold-Out Limit)</label>
+            <input id="cfg_max_total_tickets" type="number" min="0" value="0" required>
+            <div class="hint">Example: set 5000 to close automatically once 5,000 tickets are issued.</div>
+          </div>
+          <div class="form-group">
             <label>Starting Ticket Number</label>
             <input id="cfg_first_num" type="number" min="1" value="1" required>
           </div>
@@ -432,6 +480,9 @@
             <input id="cfg_ticket_width" type="number" min="1" max="10" value="5" required>
             <div class="hint">5 means #00001, #00002... | 1 means #1, #2...</div>
           </div>
+        </div>
+        <div class="form-group">
+          <label class="check-row"><input id="cfg_allow_split" type="checkbox" checked> Allow split-transfer wallet combining (e.g. 50 ETB + 50 ETB automatically combines into 1 ticket)</label>
         </div>
         <div class="form-group">
           <label class="check-row"><input id="cfg_unbounded" type="checkbox" checked onchange="toggleDates()"> Campaign always open (no start/end date restriction)</label>
@@ -528,6 +579,22 @@
         </div>
       </div>
     </form>
+
+    <div class="card" style="border-color:#fecaca;">
+      <div class="card-header"><h2 class="card-title" style="color:var(--red);">🗂 Archive &amp; Start New Lottery Round</h2></div>
+      <p class="hint">Saves a complete timestamped backup (<code>lottery.db</code> + Excel reports + seed) in <code>lottery_data/archives/</code>, clears old round tickets &amp; payments, and resets ticket numbering to your Starting Ticket Number — while keeping your Bot Token, Admin IDs, Bank Accounts, and Password untouched.</p>
+      <div class="grid-2">
+        <div class="form-group">
+          <label>New Round / Campaign Name (Optional)</label>
+          <input id="reset_new_name" type="text" placeholder="Leave blank to keep current name">
+        </div>
+        <div class="form-group">
+          <label>Type <code>RESET</code> to confirm</label>
+          <input id="reset_confirm" type="text" placeholder="RESET">
+        </div>
+      </div>
+      <button type="button" class="btn-stop" onclick="resetCampaignRound()">🗂 Archive Current Round &amp; Start Fresh</button>
+    </div>
   </section>
 
   <!-- LOGS TAB -->
@@ -693,9 +760,16 @@ async function refreshDashboard() {
   renderStatus(d.service);
 
   document.getElementById('kpiBirr').textContent = d.total_birr_formatted + ' ETB';
-  document.getElementById('kpiApproved').textContent = d.approved_payments_count + ' approved payments';
-  document.getElementById('kpiTickets').textContent = d.total_tickets_issued;
-  document.getElementById('kpiNext').textContent = d.next_ticket_formatted;
+  let appSub = d.approved_payments_count + ' approved payments';
+  if (d.total_overpayment_birr > 0) appSub += ' • Change due: ' + d.total_overpayment_birr.toFixed(2) + ' ETB';
+  if (d.total_wallet_balance_birr > 0) appSub += ' • Wallets: ' + d.total_wallet_balance_birr.toFixed(2) + ' ETB';
+  document.getElementById('kpiApproved').textContent = appSub;
+  document.getElementById('kpiTickets').textContent = d.max_total_tickets > 0
+    ? `${d.total_tickets_issued} / ${d.max_total_tickets}`
+    : d.total_tickets_issued;
+  document.getElementById('kpiNext').textContent = d.sold_out
+    ? 'SOLD OUT'
+    : (d.remaining_tickets !== null ? `${d.next_ticket_formatted} (${d.remaining_tickets} left)` : d.next_ticket_formatted);
   document.getElementById('kpiPeople').textContent = d.total_participants;
   document.getElementById('kpiWaiting').textContent = d.waiting_count + ' currently verifying';
   document.getElementById('kpiReview').textContent = d.pending_review_count + ' / ' + d.rejected_payments_count;
@@ -735,17 +809,18 @@ async function loadHolders() {
         <td>${h.formatted_numbers.map(n => `<span class="ticket-chip">${esc(n)}</span>`).join('')}</td>
       </tr>`).join('') : '<tr><td colspan="6" style="color:var(--muted)">No lottery tickets issued yet.</td></tr>';
   } else {
-    thead.innerHTML = '<tr><th>Ticket #</th><th>Holder Full Name</th><th>Bank Payer Name</th><th>Telegram</th><th>Amount</th><th>Tx Reference</th><th>Issued At</th></tr>';
+    thead.innerHTML = '<tr><th>Ticket #</th><th>Holder Full Name</th><th>Bank Payer Name</th><th>Contact</th><th>Amount</th><th>Tx Reference</th><th>Issued At</th><th>Action</th></tr>';
     tbody.innerHTML = d.tickets.length ? d.tickets.map(t => `
       <tr>
         <td><span class="ticket-chip">${esc(t.formatted)}</span></td>
         <td><strong>${esc(t.full_name)}</strong></td>
         <td>${esc(t.bank_sender) || '-'}</td>
-        <td>${esc(t.username)} (${t.telegram_id})</td>
-        <td>${t.amount.toLocaleString(undefined,{minimumFractionDigits:2})} ETB</td>
+        <td>${esc(t.username)} ${t.telegram_id > 0 ? '(' + t.telegram_id + ')' : ''}</td>
+        <td>${t.amount.toLocaleString(undefined,{minimumFractionDigits:2})} ETB${t.overpayment > 0 ? ` <small style="color:var(--amber)">(+${t.overpayment} change)</small>` : ''}</td>
         <td><code>${esc(t.transaction_id) || '-'}</code></td>
         <td>${esc(t.issued_at)}</td>
-      </tr>`).join('') : '<tr><td colspan="7" style="color:var(--muted)">No lottery tickets issued yet.</td></tr>';
+        <td><button class="btn-stop btn-sm" onclick="voidPayment(${t.payment_id}, '${esc(t.formatted)}')">Void</button></td>
+      </tr>`).join('') : '<tr><td colspan="8" style="color:var(--muted)">No lottery tickets issued yet.</td></tr>';
   }
 }
 
@@ -857,6 +932,8 @@ async function doCommit() {
   toast('Commitment hash ready! Share it publicly before drawing.');
 }
 
+let lastDrawWinners = [];
+
 async function doRunDraw() {
   const entropy = document.getElementById('drawEntropy').value.trim();
   const winners = parseInt(document.getElementById('drawWinners').value || '1', 10);
@@ -867,12 +944,96 @@ async function doRunDraw() {
   });
   const d = await res.json();
   if (!d.ok) return toast(d.error || 'Draw failed', true);
+  lastDrawWinners = d.winners || [];
   document.getElementById('drawResult').innerHTML = `
-    <div class="alert alert-ok"><span>🏆 Draw completed across <strong>${d.total_tickets}</strong> tickets! Publish Seed: <code>${esc(d.seed)}</code></span></div>
+    <div class="alert alert-ok"><span>🏆 Draw completed across <strong>${d.total_tickets}</strong> tickets! Publish Seed: <code>${esc(d.seed)}</code></span><button class="btn-primary btn-sm" onclick="notifyDrawWinners()">📣 Notify Winners on Telegram</button></div>
     <table>
-      <thead><tr><th>Rank</th><th>Winning Ticket</th><th>Holder Full Name</th><th>Telegram</th></tr></thead>
-      <tbody>${d.winners.map(w => `<tr><td><strong>#${w.rank}</strong></td><td><span class="ticket-chip">${esc(w.formatted)}</span></td><td><strong>${esc(w.full_name)}</strong></td><td>${esc(w.username)} (${w.telegram_id})</td></tr>`).join('')}</tbody>
+      <thead><tr><th>Rank</th><th>Winning Ticket</th><th>Holder Full Name</th><th>Contact</th></tr></thead>
+      <tbody>${d.winners.map(w => `<tr><td><strong>#${w.rank}</strong></td><td><span class="ticket-chip">${esc(w.formatted)}</span></td><td><strong>${esc(w.full_name)}</strong></td><td>${esc(w.username)} ${w.telegram_id > 0 ? '(' + w.telegram_id + ')' : ''}</td></tr>`).join('')}</tbody>
     </table>`;
+}
+
+async function notifyDrawWinners() {
+  if (!lastDrawWinners.length) return toast('Run a draw first.', true);
+  if (!confirm(`Send Telegram winner notification to ${lastDrawWinners.length} winner(s)?`)) return;
+  const res = await fetch('/api/draw/notify-winners', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ winners: lastDrawWinners })
+  });
+  const d = await res.json();
+  if (!d.ok) return toast(d.error || 'Failed to notify winners', true);
+  toast(`Winners notified: ${d.sent} sent, ${d.skipped_offline} offline/cash, ${d.failed} failed.`);
+}
+
+async function sendBroadcast() {
+  const message = document.getElementById('bcMessage').value.trim();
+  const audience = document.getElementById('bcAudience').value;
+  if (!message) return toast('Enter an announcement message first.', true);
+  if (!confirm('Send this message to Telegram participants now?')) return;
+  document.getElementById('bcStatus').textContent = 'Sending broadcast...';
+  const res = await fetch('/api/broadcast', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ message, audience })
+  });
+  const d = await res.json();
+  if (!d.ok) {
+    document.getElementById('bcStatus').textContent = '';
+    return toast(d.error || 'Broadcast failed', true);
+  }
+  const summary = `Broadcast finished: ${d.sent}/${d.total} delivered (${d.failed} failed/blocked).`;
+  document.getElementById('bcStatus').textContent = summary;
+  toast(summary);
+}
+
+async function issueManualTicket() {
+  const full_name = document.getElementById('man_name').value.trim();
+  const phone = document.getElementById('man_phone').value.trim();
+  const tickets = parseInt(document.getElementById('man_tickets').value || '1', 10);
+  const reference = document.getElementById('man_ref').value.trim();
+  if (!full_name) return toast('Please enter the holder full name.', true);
+  const res = await fetch('/api/tickets/manual', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ full_name, phone, tickets, reference })
+  });
+  const d = await res.json();
+  if (!d.ok) return toast(d.error || 'Could not issue manual ticket', true);
+  document.getElementById('man_name').value = '';
+  document.getElementById('man_phone').value = '';
+  document.getElementById('man_tickets').value = '1';
+  document.getElementById('man_ref').value = '';
+  toast('Issued cash ticket(s): ' + d.numbers.join(', '));
+  refreshDashboard();
+}
+
+async function voidPayment(pid, ticketLabel) {
+  const reason = prompt(`Void payment #${pid} (including ticket ${ticketLabel})?\nEnter reason for voiding/cancellation:`, 'Cancelled by organizer');
+  if (reason === null) return;
+  const res = await fetch(`/api/payments/${pid}/void`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ reason })
+  });
+  const d = await res.json();
+  if (!d.ok) return toast(d.error || 'Could not void payment', true);
+  toast('Voided ticket(s): ' + d.voided_numbers.join(', '));
+  refreshDashboard();
+}
+
+async function resetCampaignRound() {
+  const confirmVal = document.getElementById('reset_confirm').value.trim();
+  const new_campaign_name = document.getElementById('reset_new_name').value.trim();
+  if (confirmVal.toUpperCase() !== 'RESET') return toast('Please type RESET to confirm.', true);
+  if (!confirm('Archive the current round and reset tickets & payments back to the starting ticket number?')) return;
+  const res = await fetch('/api/campaign/reset', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ confirm: confirmVal, new_campaign_name })
+  });
+  const d = await res.json();
+  if (!d.ok) return toast(d.error || 'Reset failed', true);
+  document.getElementById('reset_confirm').value = '';
+  document.getElementById('reset_new_name').value = '';
+  toast('Archived to ' + d.archive_path + ' — new round ready at ' + d.next_ticket_formatted);
+  await loadSettings();
+  await refreshDashboard();
 }
 
 function toggleDates() {
@@ -904,6 +1065,8 @@ async function loadSettings() {
   document.getElementById('cfg_admin_ids').value = s.admin_ids || '';
   document.getElementById('cfg_ticket_price').value = s.ticket_price || '100';
   document.getElementById('cfg_max_tickets').value = s.max_tickets_per_payment || 50;
+  document.getElementById('cfg_max_total_tickets').value = s.max_total_tickets || 0;
+  document.getElementById('cfg_allow_split').checked = s.allow_split_payments !== false;
   document.getElementById('cfg_first_num').value = s.first_ticket_number || 1;
   document.getElementById('cfg_ticket_width').value = s.ticket_width || 5;
   document.getElementById('cfg_unbounded').checked = !!s.campaign_unbounded;
@@ -970,6 +1133,8 @@ async function saveSettings(ev, startAfter) {
     admin_ids: document.getElementById('cfg_admin_ids').value,
     ticket_price: document.getElementById('cfg_ticket_price').value,
     max_tickets_per_payment: parseInt(document.getElementById('cfg_max_tickets').value, 10),
+    max_total_tickets: parseInt(document.getElementById('cfg_max_total_tickets').value || '0', 10),
+    allow_split_payments: document.getElementById('cfg_allow_split').checked,
     first_ticket_number: parseInt(document.getElementById('cfg_first_num').value, 10),
     ticket_width: parseInt(document.getElementById('cfg_ticket_width').value, 10),
     campaign_unbounded: document.getElementById('cfg_unbounded').checked,

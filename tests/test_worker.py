@@ -158,7 +158,11 @@ async def test_sender_mismatch_goes_to_review(db):
 
 
 async def test_underpayment_rejected_and_odd_amount_reviewed(db):
-    h = Harness(*db)
+    from dataclasses import replace
+
+    sm, base_settings = db
+    strict_settings = replace(base_settings, allow_split_payments=False)
+    h = Harness(sm, strict_settings)
     await h.credit("UNDER0000001", "50")
     await h.credit("ODD000000001", "250")
     a = await h.submit(11, 1, Extracted(transaction_id="UNDER0000001"))
@@ -167,6 +171,40 @@ async def test_underpayment_rejected_and_odd_amount_reviewed(db):
     await h.run(b)
     assert (await h.payment(a)).status == "rejected"
     assert (await h.payment(b)).status == "review"
+
+
+async def test_split_payments_combine_via_wallet(db):
+    h = Harness(*db)  # allow_split_payments=True by default
+    await h.credit("SPLIT0000001", "50")
+    await h.credit("SPLIT0000002", "50")
+    await h.credit("SPLIT0000003", "150")
+    await h.credit("SPLIT0000004", "50")
+
+    # 1) First 50 ETB goes into wallet balance
+    p1 = await h.submit(11, 1, Extracted(transaction_id="SPLIT0000001", amount=Decimal("50")))
+    await h.run(p1)
+    assert (await h.payment(p1)).status == "credited"
+    assert await h.tickets(p1) == []
+    assert "wallet balance" in h.sent[-1][1].lower()
+
+    # 2) Second 50 ETB combines to 100 ETB -> issues ticket #1
+    p2 = await h.submit(11, 2, Extracted(transaction_id="SPLIT0000002", amount=Decimal("50")))
+    await h.run(p2)
+    assert (await h.payment(p2)).status == "approved"
+    assert await h.tickets(p2) == [1]
+
+    # 3) 150 ETB -> issues ticket #2 immediately and stores 50 ETB remaining balance
+    p3 = await h.submit(11, 3, Extracted(transaction_id="SPLIT0000003", amount=Decimal("150")))
+    await h.run(p3)
+    assert (await h.payment(p3)).status == "approved"
+    assert await h.tickets(p3) == [2]
+    assert "Remaining wallet balance: 50 ETB" in h.sent[-1][1]
+
+    # 4) Another 50 ETB combines with remaining 50 ETB -> issues ticket #3
+    p4 = await h.submit(11, 4, Extracted(transaction_id="SPLIT0000004", amount=Decimal("50")))
+    await h.run(p4)
+    assert (await h.payment(p4)).status == "approved"
+    assert await h.tickets(p4) == [3]
 
 
 async def test_ocr_confusable_characters_still_match(db):

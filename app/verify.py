@@ -18,15 +18,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from . import messages as M
 from .config import Settings
 from .extract import Extracted, canon_ref, normalize_ref
-from .models import BankCredit, Payment
+from .models import BankCredit, Payment, User
 
 
 @dataclass
 class Verdict:
-    outcome: str  # "approve" | "reject" | "review" | "retry"
+    outcome: str  # "approve" | "credit_wallet" | "reject" | "review" | "retry"
     reason: str | None = None  # user-facing for "reject"; internal note for "review"
     credit_id: int | None = None
     tickets: int = 0
+    new_balance: Decimal | None = None
 
 
 async def find_credit(session: AsyncSession, reference: str) -> BankCredit | None:
@@ -85,14 +86,6 @@ async def decide(
         return Verdict("reject", M.OUTSIDE_WINDOW)
 
     price = settings.ticket_price
-    if credit.amount < price:
-        return Verdict("reject", M.UNDERPAID.format(amount=credit.amount, price=price))
-    n, remainder = divmod(credit.amount, price)
-    n = int(n)
-    if remainder != 0:
-        return Verdict("review", f"Amount {credit.amount} is not a multiple of the ticket price {price}", credit.id, n)
-    if n > settings.max_tickets_per_payment:
-        return Verdict("review", f"Amount {credit.amount} would be {n} tickets (max {settings.max_tickets_per_payment})", credit.id, n)
 
     if ex.amount is not None and ex.amount != credit.amount:
         # Tolerate bank transfer fee variance (e.g. CBE debiting 100.61 with 0.61 fee)
@@ -102,18 +95,46 @@ async def decide(
             ex.raw_text and (f"{credit.amount:.2f}" in ex.raw_text or f"{credit.amount:.0f}" in ex.raw_text)
         )
         if not (is_fee_variance or appears_in_text):
+            n_est = max(1, int(credit.amount // price))
             return Verdict(
                 "review",
                 f"Screenshot shows {ex.amount} but {credit.amount} was received (possible edited image)",
                 credit.id,
-                n,
+                n_est,
             )
     if not names_compatible(ex.sender, credit.sender):
+        n_est = max(1, int(credit.amount // price))
         return Verdict(
             "review",
             f"Sender on screenshot ({ex.sender!r}) differs from sender of the payment ({credit.sender!r})",
             credit.id,
-            n,
+            n_est,
         )
+
+    if settings.allow_split_payments:
+        user = await session.get(User, payment.user_id)
+        existing_bal = Decimal(str(user.credit_balance or 0)) if user else Decimal("0")
+        effective_total = existing_bal + credit.amount
+        n, remainder = divmod(effective_total, price)
+        n = int(n)
+        if n == 0:
+            return Verdict("credit_wallet", credit_id=credit.id, tickets=0, new_balance=effective_total)
+        if n > settings.max_tickets_per_payment:
+            return Verdict(
+                "review",
+                f"Combined amount {effective_total} would be {n} tickets (max {settings.max_tickets_per_payment})",
+                credit.id,
+                n,
+            )
+        return Verdict("approve", credit_id=credit.id, tickets=n, new_balance=remainder)
+
+    if credit.amount < price:
+        return Verdict("reject", M.UNDERPAID.format(amount=credit.amount, price=price))
+    n, remainder = divmod(credit.amount, price)
+    n = int(n)
+    if remainder != 0:
+        return Verdict("review", f"Amount {credit.amount} is not a multiple of the ticket price {price}", credit.id, n)
+    if n > settings.max_tickets_per_payment:
+        return Verdict("review", f"Amount {credit.amount} would be {n} tickets (max {settings.max_tickets_per_payment})", credit.id, n)
 
     return Verdict("approve", credit_id=credit.id, tickets=n)

@@ -25,7 +25,7 @@ def _mask(name: str | None) -> str:
 
 
 async def fetch_ticket_rows(session: AsyncSession):
-    """Fetch all issued tickets joined with holder, payment, and bank credit details."""
+    """Fetch all active (non-voided) issued tickets joined with holder, payment, and bank credit details."""
     return (
         await session.execute(
             select(
@@ -39,10 +39,14 @@ async def fetch_ticket_rows(session: AsyncSession):
                 Payment.provider,
                 Ticket.payment_id,
                 Ticket.issued_at,
+                User.phone,
+                User.credit_balance,
+                Payment.overpayment_amount,
             )
             .join(User, User.id == Ticket.user_id)
             .join(Payment, Payment.id == Ticket.payment_id)
             .outerjoin(BankCredit, BankCredit.id == Payment.credit_id)
+            .where(Ticket.is_voided.is_(False))
             .order_by(Ticket.number)
         )
     ).all()
@@ -53,13 +57,17 @@ async def get_dashboard_summary(session: AsyncSession, settings: Settings) -> di
     by_status = dict(
         (await session.execute(select(Payment.status, func.count()).group_by(Payment.status))).all()
     )
-    n_tickets = (await session.execute(select(func.count()).select_from(Ticket))).scalar_one()
-    n_people = (await session.execute(select(func.count(func.distinct(Ticket.user_id))))).scalar_one()
+    n_tickets = (
+        await session.execute(select(func.count()).select_from(Ticket).where(Ticket.is_voided.is_(False)))
+    ).scalar_one()
+    n_people = (
+        await session.execute(select(func.count(func.distinct(Ticket.user_id))).where(Ticket.is_voided.is_(False)))
+    ).scalar_one()
     nxt = (await session.execute(select(Counter.next_number))).scalar_one_or_none() or settings.first_ticket_number
 
     approved_rows = (
         await session.execute(
-            select(Payment.id, Payment.amount, Payment.provider, Payment.updated_at)
+            select(Payment.id, Payment.amount, Payment.overpayment_amount, Payment.provider, Payment.updated_at)
             .where(Payment.status == "approved")
         )
     ).all()
@@ -67,19 +75,23 @@ async def get_dashboard_summary(session: AsyncSession, settings: Settings) -> di
     ticket_counts_by_pid = dict(
         (
             await session.execute(
-                select(Ticket.payment_id, func.count()).group_by(Ticket.payment_id)
+                select(Ticket.payment_id, func.count())
+                .where(Ticket.is_voided.is_(False))
+                .group_by(Ticket.payment_id)
             )
         ).all()
     )
 
     total_birr = Decimal("0")
+    total_overpayment = Decimal("0")
     provider_stats: dict[str, dict] = defaultdict(lambda: {"payments": 0, "tickets": 0, "birr": Decimal("0")})
     daily_stats: dict[str, dict] = defaultdict(lambda: {"payments": 0, "tickets": 0, "birr": Decimal("0")})
 
-    for pid, amt, provider, updated_at in approved_rows:
+    for pid, amt, overpay, provider, updated_at in approved_rows:
         t_cnt = int(ticket_counts_by_pid.get(pid, 0))
         eff_amt = Decimal(str(amt)) if amt is not None else (Decimal(t_cnt) * settings.ticket_price)
         total_birr += eff_amt
+        total_overpayment += Decimal(str(overpay or 0))
 
         prov_key = (provider or "direct/manual").upper()
         provider_stats[prov_key]["payments"] += 1
@@ -91,16 +103,28 @@ async def get_dashboard_summary(session: AsyncSession, settings: Settings) -> di
         daily_stats[day_key]["tickets"] += t_cnt
         daily_stats[day_key]["birr"] += eff_amt
 
+    wallet_total = (
+        await session.execute(select(func.coalesce(func.sum(User.credit_balance), 0)).select_from(User))
+    ).scalar_one() or 0
+
     credits_row = (
         await session.execute(
             select(func.count(), func.coalesce(func.sum(BankCredit.amount), 0)).select_from(BankCredit)
         )
     ).one()
 
+    remaining = max(0, settings.max_total_tickets - int(n_tickets)) if settings.max_total_tickets > 0 else None
+    sold_out = bool(settings.max_total_tickets > 0 and int(n_tickets) >= settings.max_total_tickets)
+
     return {
         "total_birr_received": float(total_birr),
         "total_birr_formatted": f"{total_birr:,.2f}",
+        "total_overpayment_birr": float(total_overpayment),
+        "total_wallet_balance_birr": float(wallet_total),
         "total_tickets_issued": int(n_tickets),
+        "max_total_tickets": int(settings.max_total_tickets),
+        "remaining_tickets": remaining,
+        "sold_out": sold_out,
         "total_participants": int(n_people),
         "next_ticket_number": int(nxt),
         "next_ticket_formatted": settings.fmt(int(nxt)),
@@ -108,6 +132,8 @@ async def get_dashboard_summary(session: AsyncSession, settings: Settings) -> di
         "waiting_count": int(by_status.get("received", 0) + by_status.get("verifying", 0)),
         "approved_payments_count": int(by_status.get("approved", 0)),
         "rejected_payments_count": int(by_status.get("rejected", 0)),
+        "voided_payments_count": int(by_status.get("voided", 0)),
+        "credited_payments_count": int(by_status.get("credited", 0)),
         "status_counts": {str(k): int(v) for k, v in by_status.items()},
         "bank_credits_count": int(credits_row[0] or 0),
         "bank_credits_total_birr": float(credits_row[1] or 0),
@@ -132,21 +158,26 @@ async def get_holders_data(session: AsyncSession, settings: Settings, search: st
 
     # Track unique payment amounts per user to compute total birr per holder accurately
     user_payment_amounts: dict[int, dict[int, Decimal]] = defaultdict(dict)
+    user_overpayments: dict[int, dict[int, Decimal]] = defaultdict(dict)
 
-    for number, full_name, username, tg_id, bank_sender, tx_id, amt, provider, pid, issued_at in raw_rows:
+    for number, full_name, username, tg_id, bank_sender, tx_id, amt, provider, pid, issued_at, phone, credit_bal, overpay in raw_rows:
         fmt_num = settings.fmt(number)
         eat_dt = issued_at.astimezone(EAT).strftime("%Y-%m-%d %H:%M:%S") if issued_at else ""
         eff_amt = float(amt) if amt is not None else float(settings.ticket_price)
+        overpay_f = float(overpay or 0)
+        contact = f"@{username}" if username else (phone or ("Offline / Cash" if tg_id < 0 else ""))
 
         item = {
             "number": int(number),
             "formatted": fmt_num,
-            "full_name": full_name or "(No Telegram Name)",
+            "full_name": full_name or "(No Name)",
             "bank_sender": bank_sender or "",
-            "username": f"@{username}" if username else "",
+            "username": contact,
+            "phone": phone or "",
             "telegram_id": int(tg_id),
             "transaction_id": tx_id or "",
             "amount": eff_amt,
+            "overpayment": overpay_f,
             "provider": (provider or "").upper(),
             "payment_id": int(pid),
             "issued_at": eat_dt,
@@ -154,35 +185,43 @@ async def get_holders_data(session: AsyncSession, settings: Settings, search: st
 
         if tg_id not in by_user:
             by_user[tg_id] = {
-                "full_name": full_name or "(No Telegram Name)",
-                "username": f"@{username}" if username else "",
+                "full_name": full_name or "(No Name)",
+                "username": contact,
+                "phone": phone or "",
                 "telegram_id": int(tg_id),
                 "bank_names": [],
                 "ticket_numbers": [],
                 "formatted_numbers": [],
+                "payment_ids": [],
                 "ticket_count": 0,
                 "total_birr": 0.0,
+                "overpayment_birr": 0.0,
+                "credit_balance": float(credit_bal or 0),
                 "last_issued_at": eat_dt,
             }
         u_entry = by_user[tg_id]
         if bank_sender and bank_sender not in u_entry["bank_names"]:
             u_entry["bank_names"].append(bank_sender)
+        if int(pid) not in u_entry["payment_ids"]:
+            u_entry["payment_ids"].append(int(pid))
         u_entry["ticket_numbers"].append(int(number))
         u_entry["formatted_numbers"].append(fmt_num)
         u_entry["ticket_count"] += 1
         u_entry["last_issued_at"] = eat_dt
         if pid not in user_payment_amounts[tg_id]:
             user_payment_amounts[tg_id][pid] = Decimal(str(amt)) if amt is not None else settings.ticket_price
+            user_overpayments[tg_id][pid] = Decimal(str(overpay or 0))
 
         if not q or any(
             q in str(field).lower()
-            for field in (number, fmt_num, full_name or "", bank_sender or "", username or "", tg_id, tx_id or "")
+            for field in (number, fmt_num, full_name or "", bank_sender or "", contact, phone or "", tg_id, tx_id or "")
         ):
             tickets_out.append(item)
 
     holders_out = []
     for tg_id, u_entry in by_user.items():
         u_entry["total_birr"] = float(sum(user_payment_amounts[tg_id].values(), Decimal("0")))
+        u_entry["overpayment_birr"] = float(sum(user_overpayments[tg_id].values(), Decimal("0")))
         u_entry["bank_names_str"] = ", ".join(u_entry["bank_names"])
         u_entry["numbers_str"] = ", ".join(u_entry["formatted_numbers"])
         if not q or any(
@@ -190,6 +229,7 @@ async def get_holders_data(session: AsyncSession, settings: Settings, search: st
             for field in (
                 u_entry["full_name"],
                 u_entry["username"],
+                u_entry["phone"],
                 tg_id,
                 u_entry["bank_names_str"],
                 u_entry["numbers_str"],
@@ -303,13 +343,19 @@ async def build_summary_report_excel(session: AsyncSession, settings: Settings) 
     ws.append(["Metric", "Value"])
     _style_header(ws, row_idx=6)
     ws.append(["Total Birr Received (ETB)", summary["total_birr_received"]])
+    ws.append(["Overpayment / Change Due (ETB)", summary["total_overpayment_birr"]])
+    ws.append(["Pending Wallet Balances (ETB)", summary["total_wallet_balance_birr"]])
     ws.append(["Total Lottery Numbers Issued", summary["total_tickets_issued"]])
+    if summary["max_total_tickets"] > 0:
+        ws.append(["Maximum Ticket Cap", summary["max_total_tickets"]])
+        ws.append(["Remaining Tickets", summary["remaining_tickets"]])
     ws.append(["Unique Ticket Holders", summary["total_participants"]])
     ws.append(["Next Ticket Number", summary["next_ticket_formatted"]])
     ws.append(["Approved Payments", summary["approved_payments_count"]])
     ws.append(["Pending Manual Review", summary["pending_review_count"]])
     ws.append(["Waiting / Retrying", summary["waiting_count"]])
     ws.append(["Rejected Payments", summary["rejected_payments_count"]])
+    ws.append(["Voided Payments", summary["voided_payments_count"]])
     ws.append(["Recorded Bank Credits", summary["bank_credits_count"]])
 
     ws.append([])
@@ -349,11 +395,11 @@ async def build_tickets_csv(session: AsyncSession, settings: Settings, public: b
     key = (settings.bot_token or "").encode()
     if public:
         w.writerow(["number", "holder", "name", "handle"])
-        for number, full_name, username, tg, _bs, _tx, _amt, _prov, _pid, _at in rows:
+        for number, full_name, username, tg, _bs, _tx, _amt, _prov, _pid, _at, _ph, _bal, _ovp in rows:
             holder = hmac.new(key, str(tg).encode(), hashlib.sha256).hexdigest()[:8]
             w.writerow([number, holder, _mask(full_name), _mask(username)])
     else:
         w.writerow(["number", "full_name", "telegram_id", "username", "bank_sender", "transaction_id", "amount", "payment_id", "issued_at"])
-        for number, full_name, username, tg, bank_sender, tx_id, amt, _prov, pid, issued_at in rows:
+        for number, full_name, username, tg, bank_sender, tx_id, amt, _prov, pid, issued_at, _ph, _bal, _ovp in rows:
             w.writerow([number, full_name or "", tg, username or "", bank_sender or "", tx_id or "", amt or "", pid, issued_at])
     return buf.getvalue().encode("utf-8-sig"), len(rows)
